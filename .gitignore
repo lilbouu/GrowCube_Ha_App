@@ -1,0 +1,18 @@
+AGENTS.md
+.agents/
+.codex/
+
+# Local/editor noise
+.DS_Store
+.idea/
+.vscode/
+
+# Python runtime/cache
+__pycache__/
+*.py[cod]
+
+# Home Assistant add-on/local runtime state
+*.log
+growcube_state.json
+options.json
+

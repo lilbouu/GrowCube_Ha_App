@@ -1,4 +1,4 @@
-"""Standalone GrowCube HAOS add-on web application."""
+"""GrowCube HAOS add-on backend bridge."""
 
 from __future__ import annotations
 
@@ -6,17 +6,12 @@ import asyncio
 import json
 import logging
 import os
-import posixpath
-import re
 import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
 
 from growcube_client import (
     DeviceVersionReport,
@@ -29,17 +24,15 @@ from growcube_client import (
     WaterStateReport,
     WateringRecordReport,
 )
+from mqtt_bridge import MqttBridge, MqttOptions
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(message)s")
 LOGGER = logging.getLogger("growcube-addon")
 
-APP_DIR = Path(__file__).parent
-STATIC_DIR = APP_DIR / "static"
 DATA_DIR = Path(os.environ.get("GROWCUBE_DATA_DIR", "/data"))
 STATE_PATH = DATA_DIR / "growcube_state.json"
 OPTIONS_PATH = DATA_DIR / "options.json"
-HTTP_PORT = int(os.environ.get("GROWCUBE_HTTP_PORT", "8099"))
 CHANNEL_NAMES = ("A", "B", "C", "D")
 
 
@@ -117,6 +110,7 @@ class GrowCubeManager:
         self.devices: dict[str, DeviceState] = {}
         self.runtimes: dict[str, DeviceRuntime] = {}
         self.loop: asyncio.AbstractEventLoop | None = None
+        self.mqtt_bridge: MqttBridge | None = None
 
     def load(self) -> None:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -221,6 +215,36 @@ class GrowCubeManager:
             self.touch_locked(state)
         await runtime.client.request_history(channel)
 
+    async def handle_mqtt_command(self, device_key: str, _topic: str, payload: str) -> None:
+        state = self.find_device(device_key)
+        if state is None:
+            LOGGER.warning("Ignoring MQTT command for unknown GrowCube device %s", device_key)
+            return
+
+        action, _, raw_channel = payload.partition("_")
+        if action not in {"water", "stop", "history"} or not raw_channel.isdigit():
+            LOGGER.warning("Ignoring unsupported MQTT command payload %s", payload)
+            return
+
+        channel = validate_channel(int(raw_channel))
+        if action == "water":
+            await self.water(state.id, channel, 7)
+        elif action == "stop":
+            await self.stop_watering(state.id, channel)
+        elif action == "history":
+            await self.request_history(state.id, channel)
+
+    def find_device(self, device_key: str) -> DeviceState | None:
+        with self.lock:
+            for state in self.devices.values():
+                if device_key in {
+                    mqtt_safe_id(state.id),
+                    mqtt_safe_id(state.device_id or ""),
+                    mqtt_safe_id(state.host),
+                }:
+                    return state
+        return None
+
     async def handle_connected(self, device_id: str) -> None:
         async with self.async_lock:
             state = self.devices.get(device_id)
@@ -303,6 +327,9 @@ class GrowCubeManager:
     def touch_locked(self, state: DeviceState) -> None:
         state.updated_at = now_iso()
         self.save_locked()
+        bridge = self.mqtt_bridge
+        if bridge is not None and self.loop is not None:
+            self.loop.create_task(bridge.publish_device(self._state_to_dict(state)))
 
     def save_locked(self) -> None:
         with self.lock:
@@ -381,112 +408,6 @@ class GrowCubeManager:
         }
 
 
-class GrowCubeHandler(BaseHTTPRequestHandler):
-    server_version = "GrowCubeAddon/0.1"
-
-    def do_GET(self) -> None:
-        parsed = urlparse(self.path)
-        if parsed.path == "/api/state":
-            self.send_json(self.server.manager.snapshot())
-            return
-        self.serve_static(parsed.path)
-
-    def do_POST(self) -> None:
-        parsed = urlparse(self.path)
-        try:
-            body = self.read_json_body()
-            result = self.handle_api_post(parsed.path, body)
-            self.send_json(result)
-        except ValueError as err:
-            self.send_json({"error": str(err)}, HTTPStatus.BAD_REQUEST)
-        except KeyError:
-            self.send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
-        except RuntimeError as err:
-            self.send_json({"error": str(err)}, HTTPStatus.CONFLICT)
-
-    def do_DELETE(self) -> None:
-        parsed = urlparse(self.path)
-        match = re.fullmatch(r"/api/devices/([^/]+)", parsed.path)
-        if not match:
-            self.send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
-            return
-        self.wait(self.server.manager.remove_device(match.group(1)))
-        self.send_json({"ok": True})
-
-    def handle_api_post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
-        manager = self.server.manager
-        if path == "/api/devices":
-            device = self.wait(manager.add_device(str(body.get("name", "")), str(body.get("host", "")), int(body.get("port") or 8800)))
-            return {"device": device}
-
-        match = re.fullmatch(r"/api/devices/([^/]+)/(connect|water|stop|history)", path)
-        if not match:
-            raise KeyError(path)
-        device_id, action = match.groups()
-        if action == "connect":
-            self.wait(manager.connect(device_id))
-        elif action == "water":
-            self.wait(manager.water(device_id, int(body.get("channel", 0)), int(body.get("duration", 7))))
-        elif action == "stop":
-            self.wait(manager.stop_watering(device_id, int(body.get("channel", 0))))
-        elif action == "history":
-            self.wait(manager.request_history(device_id, int(body.get("channel", 0))))
-        return {"ok": True}
-
-    def read_json_body(self) -> dict[str, Any]:
-        length = int(self.headers.get("Content-Length", "0") or 0)
-        if length <= 0:
-            return {}
-        data = self.rfile.read(length)
-        try:
-            value = json.loads(data.decode("utf-8"))
-        except json.JSONDecodeError as err:
-            raise ValueError("invalid JSON") from err
-        if not isinstance(value, dict):
-            raise ValueError("JSON body must be an object")
-        return value
-
-    def wait(self, future):
-        return manager.submit(future).result(timeout=30)
-
-    def send_json(self, value: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
-        data = json.dumps(value).encode("utf-8")
-        self.send_response(int(status))
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(data)
-
-    def serve_static(self, request_path: str) -> None:
-        path = unquote(request_path)
-        if path in ("", "/"):
-            path = "/index.html"
-        normalized = posixpath.normpath(path).lstrip("/")
-        target = STATIC_DIR / normalized
-        if not target.is_file():
-            target = STATIC_DIR / "index.html"
-        content_type = {
-            ".html": "text/html; charset=utf-8",
-            ".css": "text/css; charset=utf-8",
-            ".js": "application/javascript; charset=utf-8",
-            ".svg": "image/svg+xml",
-        }.get(target.suffix, "application/octet-stream")
-        data = target.read_bytes()
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
-    def log_message(self, fmt: str, *args) -> None:
-        LOGGER.info("%s - %s", self.address_string(), fmt % args)
-
-
-class GrowCubeHTTPServer(ThreadingHTTPServer):
-    manager: GrowCubeManager
-
-
 def validate_channel(value: int) -> int:
     channel = int(value)
     if channel < 0 or channel > 3:
@@ -505,18 +426,31 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def mqtt_safe_id(value: str) -> str:
+    return "".join(char.lower() if char.isalnum() else "_" for char in value).strip("_")
+
+
+def mqtt_options() -> MqttOptions:
+    options = GrowCubeManager._read_json(OPTIONS_PATH, {})
+    return MqttOptions(
+        host=str(options.get("mqtt_host") or os.environ.get("MQTT_HOST") or "core-mosquitto"),
+        port=int(options.get("mqtt_port") or os.environ.get("MQTT_PORT") or 1883),
+        username=str(options.get("mqtt_username") or os.environ.get("MQTT_USERNAME") or ""),
+        password=str(options.get("mqtt_password") or os.environ.get("MQTT_PASSWORD") or ""),
+    )
+
+
 manager = GrowCubeManager()
 
 
 def main() -> None:
     manager.load()
     manager.start_loop()
-    server = GrowCubeHTTPServer(("0.0.0.0", HTTP_PORT), GrowCubeHandler)
-    server.manager = manager
-    LOGGER.info("GrowCube add-on UI listening on port %s", HTTP_PORT)
-    server.serve_forever()
+    manager.mqtt_bridge = MqttBridge(mqtt_options(), manager.handle_mqtt_command)
+    manager.submit(manager.mqtt_bridge.run_forever(manager.snapshot))
+    LOGGER.info("GrowCube add-on bridge started")
+    threading.Event().wait()
 
 
 if __name__ == "__main__":
     main()
-

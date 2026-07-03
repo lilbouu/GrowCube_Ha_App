@@ -1,7 +1,7 @@
 name: GrowCube
 version: "0.1.0"
 slug: growcube
-description: Standalone GrowCube controller for Home Assistant OS
+description: GrowCube device bridge for Home Assistant OS
 url: https://github.com/lilbouu/GrowCube_Ha_App
 arch:
   - aarch64
@@ -12,20 +12,26 @@ arch:
 startup: services
 boot: auto
 init: false
-ingress: true
-ingress_port: 8099
-panel_icon: mdi:sprout
-panel_title: GrowCube
+ingress: false
 homeassistant_api: false
 host_network: true
+services:
+  - mqtt:need
 options:
   devices: []
+  mqtt_host: core-mosquitto
+  mqtt_port: 1883
+  mqtt_username: ""
+  mqtt_password: ""
 schema:
   devices:
     - name: str
       host: str
       port: "int?"
+  mqtt_host: str
+  mqtt_port: int
+  mqtt_username: str?
+  mqtt_password: password?
 ports: {}
 map:
   - addon_config:rw
-
