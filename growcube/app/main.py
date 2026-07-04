@@ -45,14 +45,39 @@ CHANNEL_NAMES = ("A", "B", "C", "D")
 
 
 @dataclass(slots=True)
+class ChannelConfig:
+    configured: bool = True
+    plant_name: str = ""
+    photo_url: str = ""
+    mode: str = "Disabled"
+    manual_duration_seconds: int = 50
+    duration_seconds: int = 10
+    amount_ml: int = 50
+    interval_hours: int = 24
+    first_watering_time: str = "08:00:00"
+    smart_min_moisture: int = 20
+    smart_max_moisture: int = 60
+    smart_daytime_watering: bool = True
+
+
+@dataclass(slots=True)
 class ChannelState:
     moisture: int | None = None
     pump_open: bool = False
+    last_watering: str | None = None
+    plant_configured: bool = True
+    outlet_locked: bool = False
+    outlet_blocked: bool = False
+    sensor_fault: bool = False
+    sensor_disconnected: bool = False
+    watering_issue: bool = False
+    watering_locked: bool = False
     history_loading: bool = False
     history_complete: bool = False
     watering_events_complete: bool = False
     history: list[dict[str, Any]] = field(default_factory=list)
     watering_events: list[dict[str, Any]] = field(default_factory=list)
+    config: ChannelConfig = field(default_factory=ChannelConfig)
 
 
 @dataclass(slots=True)
@@ -69,6 +94,10 @@ class DeviceState:
     temperature: int | None = None
     humidity: int | None = None
     water_warning: bool = False
+    device_locked: bool = False
+    tank_capacity_ml: int = 1500
+    tank_remaining_ml: int = 1500
+    tank_used_ml: int = 0
     updated_at: str | None = None
     channels: list[ChannelState] = field(default_factory=lambda: [ChannelState() for _ in range(4)])
 
@@ -224,10 +253,14 @@ class GrowCubeManager:
             self.touch_locked(state)
         await runtime.client.request_history(channel)
 
-    async def handle_mqtt_command(self, device_key: str, _topic: str, payload: str) -> None:
+    async def handle_mqtt_command(self, device_key: str, topic_key: str, payload: str) -> None:
         state = self.find_device(device_key)
         if state is None:
             LOGGER.warning("Ignoring MQTT command for unknown GrowCube device %s", device_key)
+            return
+
+        if topic_key != "command":
+            await self.handle_entity_command(state, topic_key, payload)
             return
 
         action, _, raw_channel = payload.partition("_")
@@ -241,6 +274,70 @@ class GrowCubeManager:
         elif action == "stop":
             await self.stop_watering(state.id, channel)
         elif action == "history":
+            await self.request_history(state.id, channel)
+
+    async def handle_entity_command(self, state: DeviceState, key: str, payload: str) -> None:
+        channel = channel_from_key(key)
+        async with self.async_lock:
+            if key == "tank_capacity":
+                state.tank_capacity_ml = clamp_int(payload, 500, 50000, state.tank_capacity_ml)
+                state.tank_remaining_ml = min(state.tank_remaining_ml, state.tank_capacity_ml)
+            elif key == "mark_tank_full":
+                state.tank_remaining_ml = state.tank_capacity_ml
+                state.tank_used_ml = 0
+            elif channel is not None:
+                config = state.channels[channel].config
+                if key.startswith("water_plant_"):
+                    pass
+                elif key.startswith("stop_watering_"):
+                    pass
+                elif key.startswith("load_history_"):
+                    pass
+                elif key.startswith("save_schedule_"):
+                    pass
+                elif key.startswith("plant_name_"):
+                    config.plant_name = payload.strip()[:64]
+                elif key.startswith("plant_photo_url_"):
+                    config.photo_url = payload.strip()[:512]
+                elif key.startswith("watering_mode_"):
+                    config.mode = payload if payload in {"Disabled", "Repeating", "Smart"} else "Disabled"
+                elif key.startswith("manual_duration_seconds_"):
+                    config.manual_duration_seconds = clamp_int(payload, 30, 150, config.manual_duration_seconds)
+                elif key.startswith("duration_seconds_"):
+                    config.duration_seconds = clamp_int(payload, 10, 500, config.duration_seconds)
+                    config.amount_ml = config.duration_seconds
+                elif key.startswith("interval_hours_"):
+                    config.interval_hours = clamp_int(payload, 1, 240, config.interval_hours)
+                elif key.startswith("first_watering_time_"):
+                    config.first_watering_time = normalize_time(payload, config.first_watering_time)
+                elif key.startswith("smart_min_moisture_"):
+                    config.smart_min_moisture = clamp_int(payload, 1, max(1, config.smart_max_moisture - 1), config.smart_min_moisture)
+                elif key.startswith("smart_max_moisture_"):
+                    config.smart_max_moisture = clamp_int(payload, min(99, config.smart_min_moisture + 1), 99, config.smart_max_moisture)
+                elif key.startswith("smart_daytime_watering_"):
+                    config.smart_daytime_watering = payload.upper() in {"ON", "TRUE", "1"}
+                elif key.startswith("add_plant_"):
+                    state.channels[channel].plant_configured = True
+                    config.configured = True
+                elif key.startswith("reset_plant_"):
+                    state.channels[channel].plant_configured = False
+                    config.configured = False
+                    config.plant_name = ""
+                    config.photo_url = ""
+                    config.mode = "Disabled"
+                else:
+                    LOGGER.warning("Ignoring unsupported MQTT entity command %s", key)
+                    return
+            else:
+                LOGGER.warning("Ignoring unsupported MQTT entity command %s", key)
+                return
+            self.touch_locked(state)
+
+        if channel is not None and key.startswith("water_plant_"):
+            await self.water(state.id, channel, state.channels[channel].config.manual_duration_seconds)
+        elif channel is not None and key.startswith("stop_watering_"):
+            await self.stop_watering(state.id, channel)
+        elif channel is not None and key.startswith("load_history_"):
             await self.request_history(state.id, channel)
 
     def find_device(self, device_key: str) -> DeviceState | None:
@@ -317,6 +414,7 @@ class GrowCubeManager:
             elif isinstance(report, WateringRecordReport) and 0 <= report.channel < len(state.channels):
                 channel = state.channels[report.channel]
                 timestamp = report.timestamp.replace(tzinfo=timezone.utc).isoformat()
+                channel.last_watering = timestamp
                 if all(item.get("timestamp") != timestamp for item in channel.watering_events):
                     channel.watering_events.append({"timestamp": timestamp})
                     channel.watering_events = sorted(
@@ -366,8 +464,32 @@ class GrowCubeManager:
             if isinstance(raw_channel, dict):
                 channel.moisture = optional_int(raw_channel.get("moisture"))
                 channel.pump_open = bool(raw_channel.get("pump_open", False))
+                channel.last_watering = raw_channel.get("last_watering")
+                channel.plant_configured = bool(raw_channel.get("plant_configured", True))
+                channel.outlet_locked = bool(raw_channel.get("outlet_locked", False))
+                channel.outlet_blocked = bool(raw_channel.get("outlet_blocked", False))
+                channel.sensor_fault = bool(raw_channel.get("sensor_fault", False))
+                channel.sensor_disconnected = bool(raw_channel.get("sensor_disconnected", False))
+                channel.watering_issue = bool(raw_channel.get("watering_issue", False))
+                channel.watering_locked = bool(raw_channel.get("watering_locked", False))
                 channel.history = list(raw_channel.get("history") or [])[-24 * 30 :]
                 channel.watering_events = list(raw_channel.get("watering_events") or [])[-128:]
+                config = raw_channel.get("config")
+                if isinstance(config, dict):
+                    channel.config = ChannelConfig(
+                        configured=bool(config.get("configured", channel.plant_configured)),
+                        plant_name=str(config.get("plant_name") or ""),
+                        photo_url=str(config.get("photo_url") or ""),
+                        mode=str(config.get("mode") or "Disabled"),
+                        manual_duration_seconds=clamp_int(config.get("manual_duration_seconds"), 30, 150, 50),
+                        duration_seconds=clamp_int(config.get("duration_seconds"), 10, 500, 10),
+                        amount_ml=clamp_int(config.get("amount_ml"), 10, 500, 50),
+                        interval_hours=clamp_int(config.get("interval_hours"), 1, 240, 24),
+                        first_watering_time=normalize_time(config.get("first_watering_time"), "08:00:00"),
+                        smart_min_moisture=clamp_int(config.get("smart_min_moisture"), 1, 98, 20),
+                        smart_max_moisture=clamp_int(config.get("smart_max_moisture"), 2, 99, 60),
+                        smart_daytime_watering=bool(config.get("smart_daytime_watering", True)),
+                    )
             channels.append(channel)
         while len(channels) < 4:
             channels.append(ChannelState())
@@ -382,6 +504,10 @@ class GrowCubeManager:
             temperature=optional_int(item.get("temperature")),
             humidity=optional_int(item.get("humidity")),
             water_warning=bool(item.get("water_warning", False)),
+            device_locked=bool(item.get("device_locked", False)),
+            tank_capacity_ml=clamp_int(item.get("tank_capacity_ml"), 500, 50000, 1500),
+            tank_remaining_ml=clamp_int(item.get("tank_remaining_ml"), 0, 50000, 1500),
+            tank_used_ml=clamp_int(item.get("tank_used_ml"), 0, 50000, 0),
             updated_at=item.get("updated_at"),
             channels=channels,
         )
@@ -401,16 +527,46 @@ class GrowCubeManager:
             "temperature": state.temperature,
             "humidity": state.humidity,
             "water_warning": state.water_warning,
+            "device_locked": state.device_locked,
+            "tank_capacity_ml": state.tank_capacity_ml,
+            "tank_remaining_ml": state.tank_remaining_ml,
+            "tank_level": round(state.tank_remaining_ml / max(1, state.tank_capacity_ml) * 100),
+            "tank_used_ml": state.tank_used_ml,
+            "tank_days_left": None,
             "updated_at": state.updated_at,
             "channels": [
                 {
                     "moisture": channel.moisture,
                     "pump_open": channel.pump_open,
+                    "last_watering": channel.last_watering,
+                    "next_watering": None,
+                    "plant_configured": channel.plant_configured and channel.config.configured,
+                    "outlet_locked": channel.outlet_locked,
+                    "outlet_blocked": channel.outlet_blocked,
+                    "sensor_fault": channel.sensor_fault,
+                    "sensor_disconnected": channel.sensor_disconnected,
+                    "watering_issue": channel.watering_issue,
+                    "watering_locked": channel.watering_locked,
                     "history_loading": channel.history_loading,
                     "history_complete": channel.history_complete,
                     "watering_events_complete": channel.watering_events_complete,
+                    "history_count": len(channel.history),
                     "history": channel.history,
                     "watering_events": channel.watering_events,
+                    "config": {
+                        "configured": channel.config.configured,
+                        "plant_name": channel.config.plant_name,
+                        "photo_url": channel.config.photo_url,
+                        "mode": channel.config.mode,
+                        "manual_duration_seconds": channel.config.manual_duration_seconds,
+                        "duration_seconds": channel.config.duration_seconds,
+                        "amount_ml": channel.config.amount_ml,
+                        "interval_hours": channel.config.interval_hours,
+                        "first_watering_time": channel.config.first_watering_time,
+                        "smart_min_moisture": channel.config.smart_min_moisture,
+                        "smart_max_moisture": channel.config.smart_max_moisture,
+                        "smart_daytime_watering": channel.config.smart_daytime_watering,
+                    },
                 }
                 for channel in state.channels
             ],
@@ -429,6 +585,35 @@ def optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def clamp_int(value: Any, minimum: int, maximum: int, fallback: int) -> int:
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError):
+        parsed = fallback
+    return max(minimum, min(maximum, parsed))
+
+
+def normalize_time(value: Any, fallback: str) -> str:
+    text = str(value or "").strip()
+    parts = text.split(":")
+    if len(parts) < 2:
+        return fallback
+    try:
+        hour = max(0, min(23, int(parts[0])))
+        minute = max(0, min(59, int(parts[1])))
+        second = max(0, min(59, int(parts[2]) if len(parts) > 2 else 0))
+    except ValueError:
+        return fallback
+    return f"{hour:02d}:{minute:02d}:{second:02d}"
+
+
+def channel_from_key(key: str) -> int | None:
+    suffix = key.rsplit("_", 1)[-1]
+    if suffix in "abcd":
+        return "abcd".index(suffix)
+    return None
 
 
 def now_iso() -> str:

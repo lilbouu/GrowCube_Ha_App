@@ -152,14 +152,23 @@ class MqttBridge:
             "configuration_url": f"http://{device.get('host')}",
         }
 
+        await self._clear_legacy_configs(unique_id)
         await self._sensor(unique_id, "temperature", "Temperature", base, device_info, "°C", "temperature", "{{ value_json.temperature }}")
         await self._sensor(unique_id, "humidity", "Humidity", base, device_info, "%", "humidity", "{{ value_json.humidity }}")
-        await self._binary(unique_id, "connected", "Connected", base, device_info, "{{ 'ON' if value_json.connected else 'OFF' }}")
-        await self._binary(unique_id, "water_warning", "Water warning", base, device_info, "{{ 'ON' if value_json.water_warning else 'OFF' }}", "moisture")
+        await self._sensor(unique_id, "tank_remaining", "Tank remaining", base, device_info, "mL", None, "{{ value_json.tank_remaining_ml }}", "mdi:cup-water")
+        await self._sensor(unique_id, "tank_level", "Tank level", base, device_info, "%", None, "{{ value_json.tank_level }}", "mdi:water-percent")
+        await self._sensor(unique_id, "tank_used", "Tank used", base, device_info, "mL", None, "{{ value_json.tank_used_ml }}", "mdi:water-minus")
+        await self._sensor(unique_id, "tank_days_left", "Tank days left", base, device_info, "d", None, "{{ value_json.tank_days_left }}", "mdi:calendar-range")
+        await self._binary(unique_id, "connection_problem", "Connection problem", base, device_info, "{{ 'ON' if not value_json.connected else 'OFF' }}", "problem", "mdi:wifi-alert", "diagnostic")
+        await self._binary(unique_id, "device_locked", "Device locked", base, device_info, "{{ 'ON' if value_json.device_locked else 'OFF' }}", "problem", None, "diagnostic")
+        await self._binary(unique_id, "water_warning", "Water warning", base, device_info, "{{ 'ON' if value_json.water_warning else 'OFF' }}", "problem", "mdi:water-alert", "diagnostic")
+        await self._number(unique_id, "tank_capacity", "Tank capacity", base, device_info, 500, 50000, 50, "mL", "mdi:cup-water", "{{ value_json.tank_capacity_ml }}")
+        await self._button(unique_id, "mark_tank_full", "Mark tank full", base, device_info, "mark_tank_full", "mdi:cup-water")
 
         for channel in range(4):
             channel_id = "abcd"[channel]
             channel_name = channel_id.upper()
+            channel_base = f"value_json.channels[{channel}]"
             await self._sensor(
                 unique_id,
                 f"moisture_{channel_id}",
@@ -168,17 +177,81 @@ class MqttBridge:
                 device_info,
                 "%",
                 "moisture",
-                f"{{{{ value_json.channels[{channel}].moisture }}}}",
+                f"{{{{ {channel_base}.moisture }}}}",
+                "mdi:cup-water",
+            )
+            await self._sensor(
+                unique_id,
+                f"last_watering_{channel_id}",
+                f"Last watering {channel_name}",
+                base,
+                device_info,
+                None,
+                "timestamp",
+                f"{{{{ {channel_base}.last_watering }}}}",
+                "mdi:water-clock",
+            )
+            await self._sensor(
+                unique_id,
+                f"history_count_{channel_id}",
+                f"History count {channel_name}",
+                base,
+                device_info,
+                None,
+                None,
+                f"{{{{ {channel_base}.history_count }}}}",
+                "mdi:chart-timeline-variant",
+                (
+                    "{"
+                    f"\"history_loading\":{{{{ {channel_base}.history_loading | tojson }}}},"
+                    f"\"history_complete\":{{{{ {channel_base}.history_complete | tojson }}}},"
+                    f"\"watering_events_complete\":{{{{ {channel_base}.watering_events_complete | tojson }}}},"
+                    f"\"history_points\":{{{{ {channel_base}.history_count }}}},"
+                    f"\"history\":{{{{ {channel_base}.history | tojson }}}},"
+                    f"\"watering_events\":{{{{ {channel_base}.watering_events | tojson }}}}"
+                    "}"
+                ),
+            )
+            await self._sensor(
+                unique_id,
+                f"next_watering_{channel_id}",
+                f"Next watering {channel_name}",
+                base,
+                device_info,
+                None,
+                "timestamp",
+                f"{{{{ {channel_base}.next_watering }}}}",
+                "mdi:calendar-clock",
             )
             await self._binary(
                 unique_id,
-                f"pump_{channel_id}",
-                f"Pump {channel_name}",
+                f"plant_{channel_id}_configured",
+                f"Plant {channel_name} configured",
                 base,
                 device_info,
-                f"{{{{ 'ON' if value_json.channels[{channel}].pump_open else 'OFF' }}}}",
-                "running",
+                f"{{{{ 'ON' if {channel_base}.plant_configured else 'OFF' }}}}",
+                None,
+                "mdi:sprout",
             )
+            await self._binary(
+                unique_id,
+                f"pump_{channel_id}_open",
+                f"Pump {channel_name} open",
+                base,
+                device_info,
+                f"{{{{ 'ON' if {channel_base}.pump_open else 'OFF' }}}}",
+                "opening",
+                "mdi:water",
+                None,
+                False,
+            )
+            await self._binary(unique_id, f"outlet_{channel_id}_locked", f"Outlet {channel_name} locked", base, device_info, f"{{{{ 'ON' if {channel_base}.outlet_locked else 'OFF' }}}}", "problem", "mdi:pump-off", "diagnostic")
+            await self._binary(unique_id, f"outlet_{channel_id}_blocked", f"Outlet {channel_name} blocked", base, device_info, f"{{{{ 'ON' if {channel_base}.outlet_blocked else 'OFF' }}}}", "problem", "mdi:water-pump-off", "diagnostic")
+            await self._binary(unique_id, f"sensor_{channel_id}_fault", f"Sensor {channel_name} fault", base, device_info, f"{{{{ 'ON' if {channel_base}.sensor_fault else 'OFF' }}}}", "problem", "mdi:thermometer-probe-off", "diagnostic")
+            await self._binary(unique_id, f"sensor_{channel_id}_disconnected", f"Sensor {channel_name} disconnected", base, device_info, f"{{{{ 'ON' if {channel_base}.sensor_disconnected else 'OFF' }}}}", "problem", "mdi:thermometer-probe-off", "diagnostic")
+            await self._binary(unique_id, f"watering_issue_{channel_id}", f"Watering issue {channel_name}", base, device_info, f"{{{{ 'ON' if {channel_base}.watering_issue else 'OFF' }}}}", "problem", "mdi:water-alert", "diagnostic")
+            await self._binary(unique_id, f"watering_locked_{channel_id}", f"Watering locked {channel_name}", base, device_info, f"{{{{ 'ON' if {channel_base}.watering_locked else 'OFF' }}}}", "problem", "mdi:lock-alert", "diagnostic")
+            await self._binary(unique_id, f"history_{channel_id}_loading", f"History {channel_name} loading", base, device_info, f"{{{{ 'ON' if {channel_base}.history_loading else 'OFF' }}}}", "running", "mdi:progress-clock", "diagnostic", False)
             await self._button(
                 unique_id,
                 f"water_plant_{channel_id}",
@@ -206,20 +279,73 @@ class MqttBridge:
                 f"history_{channel}",
                 "mdi:chart-line",
             )
+            await self._button(unique_id, f"save_schedule_{channel_id}", f"Save watering {channel_name}", base, device_info, f"save_schedule_{channel_id}", "mdi:content-save")
+            await self._button(unique_id, f"add_plant_{channel_id}", f"Add plant {channel_name}", base, device_info, f"add_plant_{channel_id}", "mdi:plus-circle-outline")
+            await self._button(unique_id, f"reset_plant_{channel_id}", f"Reset plant {channel_name}", base, device_info, f"reset_plant_{channel_id}", "mdi:delete-outline")
+            await self._number(unique_id, f"manual_duration_seconds_{channel_id}", f"Manual watering amount {channel_name}", base, device_info, 30, 150, 10, "mL", "mdi:watering-can", f"{{{{ {channel_base}.config.manual_duration_seconds }}}}")
+            await self._number(unique_id, f"duration_seconds_{channel_id}", f"Watering amount {channel_name}", base, device_info, 10, 500, 10, "mL", "mdi:timer-outline", f"{{{{ {channel_base}.config.duration_seconds }}}}")
+            await self._number(unique_id, f"interval_hours_{channel_id}", f"Watering interval {channel_name}", base, device_info, 1, 240, 1, "h", "mdi:calendar-clock", f"{{{{ {channel_base}.config.interval_hours }}}}")
+            await self._number(unique_id, f"smart_min_moisture_{channel_id}", f"Minimum moisture {channel_name}", base, device_info, 1, 99, 1, "%", "mdi:water-percent", f"{{{{ {channel_base}.config.smart_min_moisture }}}}")
+            await self._number(unique_id, f"smart_max_moisture_{channel_id}", f"Maximum moisture {channel_name}", base, device_info, 1, 99, 1, "%", "mdi:water-percent", f"{{{{ {channel_base}.config.smart_max_moisture }}}}")
+            await self._select(unique_id, f"watering_mode_{channel_id}", f"Watering mode {channel_name}", base, device_info, ["Disabled", "Repeating", "Smart"], "mdi:sprinkler-variant", f"{{{{ {channel_base}.config.mode }}}}")
+            await self._switch(unique_id, f"smart_daytime_watering_{channel_id}", f"Daytime watering {channel_name}", base, device_info, "mdi:white-balance-sunny", f"{{{{ 'ON' if {channel_base}.config.smart_daytime_watering else 'OFF' }}}}")
+            await self._text(unique_id, f"plant_name_{channel_id}", f"Plant name {channel_name}", base, device_info, 64, "mdi:flower", f"{{{{ {channel_base}.config.plant_name }}}}")
+            await self._text(unique_id, f"plant_photo_url_{channel_id}", f"Plant photo URL {channel_name}", base, device_info, 512, "mdi:image-outline", f"{{{{ {channel_base}.config.photo_url }}}}")
+            await self._time(unique_id, f"first_watering_time_{channel_id}", f"First watering {channel_name}", base, device_info, "mdi:clock-outline", f"{{{{ {channel_base}.config.first_watering_time }}}}")
 
-    async def _sensor(self, device_id: str, key: str, name: str, base: str, device: dict, unit: str, device_class: str, template: str) -> None:
-        await self._config("sensor", device_id, key, {
+    async def _clear_legacy_configs(self, device_id: str) -> None:
+        assert self.client is not None
+        legacy = [("binary_sensor", "connected")]
+        legacy.extend(("binary_sensor", f"pump_{channel}") for channel in "abcd")
+        for component, key in legacy:
+            topic = f"homeassistant/{component}/growcube/{device_id}_{key}/config"
+            await self.client.publish(topic, "", retain=True)
+
+    async def _sensor(
+        self,
+        device_id: str,
+        key: str,
+        name: str,
+        base: str,
+        device: dict,
+        unit: str | None,
+        device_class: str | None,
+        template: str,
+        icon: str | None = None,
+        json_attributes_template: str | None = None,
+    ) -> None:
+        config = {
             "name": name,
             "unique_id": f"{device_id}_{key}",
             "state_topic": f"{base}/state",
             "value_template": template,
-            "unit_of_measurement": unit,
-            "device_class": device_class,
             "availability_topic": f"{base}/availability",
             "device": device,
-        })
+        }
+        if unit:
+            config["unit_of_measurement"] = unit
+        if device_class:
+            config["device_class"] = device_class
+        if icon:
+            config["icon"] = icon
+        if json_attributes_template:
+            config["json_attributes_topic"] = f"{base}/state"
+            config["json_attributes_template"] = json_attributes_template
+        await self._config("sensor", device_id, key, config)
 
-    async def _binary(self, device_id: str, key: str, name: str, base: str, device: dict, template: str, device_class: str | None = None) -> None:
+    async def _binary(
+        self,
+        device_id: str,
+        key: str,
+        name: str,
+        base: str,
+        device: dict,
+        template: str,
+        device_class: str | None = None,
+        icon: str | None = None,
+        entity_category: str | None = None,
+        enabled_by_default: bool = True,
+    ) -> None:
         config = {
             "name": name,
             "unique_id": f"{device_id}_{key}",
@@ -232,16 +358,96 @@ class MqttBridge:
         }
         if device_class:
             config["device_class"] = device_class
+        if icon:
+            config["icon"] = icon
+        if entity_category:
+            config["entity_category"] = entity_category
+        if not enabled_by_default:
+            config["enabled_by_default"] = False
         await self._config("binary_sensor", device_id, key, config)
 
     async def _button(self, device_id: str, key: str, name: str, base: str, device: dict, payload: str, icon: str) -> None:
         await self._config("button", device_id, key, {
             "name": name,
             "unique_id": f"{device_id}_{key}",
-            "command_topic": f"{base}/command/set",
+            "command_topic": f"{base}/{key}/set",
             "payload_press": payload,
             "availability_topic": f"{base}/availability",
             "icon": icon,
+            "device": device,
+        })
+
+    async def _number(self, device_id: str, key: str, name: str, base: str, device: dict, minimum: int, maximum: int, step: int, unit: str, icon: str, template: str) -> None:
+        await self._config("number", device_id, key, {
+            "name": name,
+            "unique_id": f"{device_id}_{key}",
+            "state_topic": f"{base}/state",
+            "value_template": template,
+            "command_topic": f"{base}/{key}/set",
+            "min": minimum,
+            "max": maximum,
+            "step": step,
+            "unit_of_measurement": unit,
+            "mode": "box",
+            "icon": icon,
+            "entity_category": "config",
+            "availability_topic": f"{base}/availability",
+            "device": device,
+        })
+
+    async def _select(self, device_id: str, key: str, name: str, base: str, device: dict, options: list[str], icon: str, template: str) -> None:
+        await self._config("select", device_id, key, {
+            "name": name,
+            "unique_id": f"{device_id}_{key}",
+            "state_topic": f"{base}/state",
+            "value_template": template,
+            "command_topic": f"{base}/{key}/set",
+            "options": options,
+            "icon": icon,
+            "entity_category": "config",
+            "availability_topic": f"{base}/availability",
+            "device": device,
+        })
+
+    async def _switch(self, device_id: str, key: str, name: str, base: str, device: dict, icon: str, template: str) -> None:
+        await self._config("switch", device_id, key, {
+            "name": name,
+            "unique_id": f"{device_id}_{key}",
+            "state_topic": f"{base}/state",
+            "value_template": template,
+            "command_topic": f"{base}/{key}/set",
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "icon": icon,
+            "entity_category": "config",
+            "availability_topic": f"{base}/availability",
+            "device": device,
+        })
+
+    async def _text(self, device_id: str, key: str, name: str, base: str, device: dict, maximum: int, icon: str, template: str) -> None:
+        await self._config("text", device_id, key, {
+            "name": name,
+            "unique_id": f"{device_id}_{key}",
+            "state_topic": f"{base}/state",
+            "value_template": template,
+            "command_topic": f"{base}/{key}/set",
+            "max": maximum,
+            "icon": icon,
+            "entity_category": "config",
+            "availability_topic": f"{base}/availability",
+            "device": device,
+        })
+
+    async def _time(self, device_id: str, key: str, name: str, base: str, device: dict, icon: str, template: str) -> None:
+        await self._config("time", device_id, key, {
+            "name": name,
+            "unique_id": f"{device_id}_{key}",
+            "state_topic": f"{base}/state",
+            "value_template": template,
+            "command_topic": f"{base}/{key}/set",
+            "icon": icon,
+            "entity_category": "config",
+            "availability_topic": f"{base}/availability",
             "device": device,
         })
 
