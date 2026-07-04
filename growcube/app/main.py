@@ -47,7 +47,7 @@ OPTIONS_PATH = DATA_DIR / "options.json"
 APP_DIR = Path(__file__).parent
 CARD_SOURCE_PATH = APP_DIR / "www" / "growcube-card.js"
 CARD_IMAGE_SOURCE_DIR = APP_DIR / "www" / "images"
-CARD_VERSION = "0.2.18"
+CARD_VERSION = "0.2.19"
 CARD_API_URL_PLACEHOLDER = "__GROWCUBE_ADDON_API_URL__"
 DEFAULT_INGRESS_PORT = 8099
 CLOUD_CATALOG_HOSTS = ("https://api.growcube.cc", "http://api.growcube.cc")
@@ -1088,11 +1088,18 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
     server_version = "GrowCubeAddon/0.2"
 
     def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        LOGGER.info(
+            "Ingress API request remote=%s path=%s query=%r",
+            self.client_address[0],
+            parsed.path,
+            parsed.query,
+        )
         if not self._allow_request():
+            LOGGER.warning("Ingress API forbidden remote=%s path=%s", self.client_address[0], parsed.path)
             self._write_json({"error": "forbidden"}, HTTPStatus.FORBIDDEN)
             return
 
-        parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
         try:
             if parsed.path in {"/", "/health"}:
@@ -1100,7 +1107,7 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
             elif parsed.path == "/plants/search":
                 query = first_query_value(params, "query")
                 plants = search_plants(query)
-                LOGGER.info("Plant search query=%r results=%s", query, len(plants))
+                LOGGER.info("Plant search finished query=%r results=%s", query, len(plants))
                 self._write_json({"plants": plants})
             elif parsed.path == "/dashboard":
                 self._write_json(manager.dashboard_payload())
@@ -1146,6 +1153,13 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
 
     def _write_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        LOGGER.info(
+            "Ingress API response remote=%s path=%s status=%s bytes=%s",
+            self.client_address[0],
+            urlparse(self.path).path,
+            int(status),
+            len(body),
+        )
         self.send_response(int(status))
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
@@ -1186,6 +1200,7 @@ def search_plants(query: str) -> list[dict[str, Any]]:
     data = fetch_catalog_json(f"/api/en/plants/name/{quote(query, safe='')}")
     plants = data.get("plants")
     if not isinstance(plants, list):
+        LOGGER.warning("GrowCube cloud catalog returned no plants list for query=%r keys=%s", query, sorted(data.keys()))
         return []
     return [plant_from_api(plant) for plant in plants[:CLOUD_CATALOG_LIMIT] if isinstance(plant, dict)]
 
@@ -1201,10 +1216,19 @@ def fetch_catalog_json(path: str) -> dict[str, Any]:
             },
         )
         try:
+            LOGGER.info("GrowCube cloud catalog request url=%s%s", host, path)
             with urlopen(request, timeout=15) as response:
                 data = json.loads(response.read().decode("utf-8"))
+                LOGGER.info(
+                    "GrowCube cloud catalog response url=%s%s status=%s keys=%s",
+                    host,
+                    path,
+                    response.status,
+                    sorted(data.keys()) if isinstance(data, dict) else type(data).__name__,
+                )
                 return data if isinstance(data, dict) else {}
         except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as err:
+            LOGGER.warning("GrowCube cloud catalog request failed url=%s%s error=%s", host, path, err)
             last_error = err
     if last_error is not None:
         raise last_error

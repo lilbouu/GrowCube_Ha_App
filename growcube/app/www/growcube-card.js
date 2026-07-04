@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.18-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.19-addon-compat";
 const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
@@ -199,18 +199,24 @@ class GrowcubeCard extends HTMLElement {
   async _fetchAddonApi(path) {
     const baseUrl = await this._addonApiUrl();
     if (!baseUrl) {
+      console.warn("[GrowCube] add-on API URL is unavailable", { path });
       return undefined;
     }
-    const response = await fetch(`${baseUrl}/${String(path).replace(/^\/+/, "")}`, {
+    const url = `${baseUrl}/${String(path).replace(/^\/+/, "")}`;
+    console.info("[GrowCube] add-on API request", { url });
+    const response = await fetch(url, {
       credentials: "same-origin",
       headers: {
         "Accept": "application/json",
       },
     });
     if (!response.ok) {
-      throw new Error(`GrowCube add-on API failed: ${response.status}`);
+      const body = await response.text();
+      throw new Error(`GrowCube add-on API failed: ${response.status} ${response.statusText}: ${body.slice(0, 240)}`);
     }
-    return response.json();
+    const result = await response.json();
+    console.info("[GrowCube] add-on API response", { url, keys: Object.keys(result || {}) });
+    return result;
   }
 
   async _addonApiUrl() {
@@ -221,9 +227,11 @@ class GrowcubeCard extends HTMLElement {
     const value = String(configured || "").trim();
     if (value && value !== "__GROWCUBE_ADDON_API_URL__") {
       this._addonApiUrlCache = this._normalizeAddonApiUrl(value);
+      console.info("[GrowCube] using configured add-on API URL", { url: this._addonApiUrlCache });
       return this._addonApiUrlCache;
     }
     this._addonApiUrlCache = await this._discoverAddonApiUrl();
+    console.info("[GrowCube] discovered add-on API URL", { url: this._addonApiUrlCache });
     return this._addonApiUrlCache;
   }
 
@@ -240,6 +248,7 @@ class GrowcubeCard extends HTMLElement {
     for (const slug of [...new Set(slugs.map((item) => String(item).trim()).filter(Boolean))]) {
       const url = await this._addonInfoUrl(slug);
       if (url) {
+        console.info("[GrowCube] matched add-on slug", { slug, url });
         return url;
       }
     }
@@ -254,6 +263,7 @@ class GrowcubeCard extends HTMLElement {
       if (match?.slug) {
         const url = await this._addonInfoUrl(match.slug);
         if (url) {
+          console.info("[GrowCube] matched add-on from Supervisor list", { slug: match.slug, url });
           return url;
         }
       }
@@ -269,6 +279,7 @@ class GrowcubeCard extends HTMLElement {
       const data = result?.data || result || {};
       return this._normalizeAddonApiUrl(data.ingress_url || data.ingress_entry || data.ingress_path || "");
     } catch (error) {
+      console.warn("[GrowCube] add-on info lookup failed", { slug, error: error?.message || String(error) });
       return "";
     }
   }
@@ -1397,9 +1408,15 @@ class GrowcubeCard extends HTMLElement {
       try {
         apiResult = await this._configureChannelApi(channel, values, mode === "Smart" || mode === "Repeating");
       } catch (error) {
+        console.warn("[GrowCube] add plant via add-on API failed; falling back to MQTT entities", {
+          channel,
+          mode,
+          error: error?.message || String(error),
+        });
         apiResult = undefined;
       }
       if (apiResult) {
+        console.info("[GrowCube] add plant via add-on API succeeded", { channel, mode });
         this._plantWizardOpen = false;
         this._showToast("Plant added");
         this._navigateToChannel(channel);
@@ -1480,11 +1497,12 @@ class GrowcubeCard extends HTMLElement {
     try {
       const result = await this._fetchAddonApi(`plants/search?query=${encodeURIComponent(query)}`);
       const plants = Array.isArray(result?.plants) ? result.plants : [];
+      console.info("[GrowCube] add-on plant search result", { query, count: plants.length });
       if (plants.length) {
         return plants;
       }
     } catch (error) {
-      // The HAOS add-on ingress API may not be available on older installs.
+      console.warn("[GrowCube] add-on plant search failed", { query, error: error?.message || String(error) });
     }
 
     if (this._hass?.callApi) {
@@ -1494,23 +1512,26 @@ class GrowcubeCard extends HTMLElement {
           `growcube/plants/search?query=${encodeURIComponent(query)}`,
         );
         const plants = Array.isArray(result?.plants) ? result.plants : [];
+        console.info("[GrowCube] Home Assistant plant search result", { query, count: plants.length });
         if (plants.length) {
           return plants;
         }
       } catch (error) {
-        // The add-on build does not register Home Assistant's /api/growcube routes.
+        console.warn("[GrowCube] Home Assistant plant search failed", { query, error: error?.message || String(error) });
       }
     }
 
     try {
       const result = await this._fetchGrowCubeCatalog(query);
+      console.info("[GrowCube] direct GrowCube catalog result", { query, count: result.length });
       if (result.length) {
         return result;
       }
     } catch (error) {
-      // Browser CORS or internet access can block the cloud catalog; use local data.
+      console.warn("[GrowCube] direct GrowCube catalog failed", { query, error: error?.message || String(error) });
     }
 
+    console.warn("[GrowCube] using custom plant fallback", { query });
     return this._customPlantCatalogResult(query);
   }
 

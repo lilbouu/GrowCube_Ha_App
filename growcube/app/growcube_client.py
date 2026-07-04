@@ -216,7 +216,8 @@ class GrowCubeClient:
                     break
                 buffer.extend(chunk)
                 for message in parse_messages(buffer):
-                    LOGGER.info("GrowCube RX %s:%s %s", self.host, self.port, message.raw)
+                    if message.command not in {20, 21}:
+                        LOGGER.info("GrowCube RX %s:%s %s", self.host, self.port, message.raw)
                     await _maybe_call(self.on_report, report_from_message(message.command, message.payload, message.raw))
         except asyncio.CancelledError:
             return
