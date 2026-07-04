@@ -1137,7 +1137,7 @@ class GrowcubeCard extends HTMLElement {
   }
 
   async _searchPlantCatalog() {
-    if (!this._hass?.callApi || this._plantWizardSearch.trim().length < 2) {
+    if (this._plantWizardSearch.trim().length < 2) {
       this._plantWizardResults = [];
       this._plantWizardResultPage = 0;
       this._plantWizardError = this._plantWizardSearch.trim() ? "Type at least 2 characters" : "";
@@ -1148,21 +1148,128 @@ class GrowcubeCard extends HTMLElement {
     this._plantWizardError = "";
     this._render();
     try {
-      const result = await this._hass.callApi(
-        "GET",
-        `growcube/plants/search?query=${encodeURIComponent(this._plantWizardSearch.trim())}`,
-      );
-      this._plantWizardResults = Array.isArray(result?.plants) ? result.plants : [];
+      this._plantWizardResults = await this._catalogSearch(this._plantWizardSearch.trim());
       this._plantWizardResultPage = 0;
       this._plantWizardError = this._plantWizardResults.length ? "" : "No plants found";
     } catch (error) {
-      this._plantWizardResults = [];
+      this._plantWizardResults = this._fallbackPlantCatalogSearch(this._plantWizardSearch.trim(), true);
       this._plantWizardResultPage = 0;
-      this._plantWizardError = "Catalog unavailable";
+      this._plantWizardError = this._plantWizardResults.length
+        ? "Online catalog unavailable; using local profile"
+        : "Catalog unavailable";
     } finally {
       this._plantWizardLoading = false;
       this._render();
     }
+  }
+
+  async _catalogSearch(query) {
+    if (this._hass?.callApi) {
+      try {
+        const result = await this._hass.callApi(
+          "GET",
+          `growcube/plants/search?query=${encodeURIComponent(query)}`,
+        );
+        const plants = Array.isArray(result?.plants) ? result.plants : [];
+        if (plants.length) {
+          return plants;
+        }
+      } catch (error) {
+        // The add-on build does not register Home Assistant's /api/growcube routes.
+      }
+    }
+
+    try {
+      const result = await this._fetchGrowCubeCatalog(query);
+      if (result.length) {
+        return result;
+      }
+    } catch (error) {
+      // Browser CORS or internet access can block the cloud catalog; use local data.
+    }
+
+    return this._fallbackPlantCatalogSearch(query, true);
+  }
+
+  async _fetchGrowCubeCatalog(query) {
+    const response = await fetch(`https://api.growcube.cc/api/en/plants/name/${encodeURIComponent(query)}`, {
+      headers: {
+        "Accept": "application/json",
+      },
+    });
+    if (!response.ok) {
+      throw new Error(`Catalog request failed: ${response.status}`);
+    }
+    const data = await response.json();
+    const plants = Array.isArray(data?.plants) ? data.plants : [];
+    return plants.slice(0, 40).map((plant) => this._plantFromGrowCubeApi(plant));
+  }
+
+  _plantFromGrowCubeApi(plant) {
+    return {
+      id: Number(plant?.id) || 0,
+      name: String(plant?.name || ""),
+      display_name: String(plant?.display_name || plant?.name || ""),
+      category: String(plant?.category || ""),
+      description: String(plant?.description || ""),
+      image_url: String(plant?.image || ""),
+      moisture_min: this._clamp(Number(plant?.min_soil_moist) || 30, 0, 100),
+      moisture_max: this._clamp(Number(plant?.max_soil_moist) || 60, 0, 100),
+      temp_min: Number(plant?.min_temp) || 0,
+      temp_max: Number(plant?.max_temp) || 0,
+      air_humidity_min: Number(plant?.min_env_humid) || 0,
+      air_humidity_max: Number(plant?.max_env_humid) || 0,
+    };
+  }
+
+  _fallbackPlantCatalogSearch(query, includeCustom = false) {
+    const normalizedQuery = this._normalizeProfileText(query).toLowerCase();
+    const words = normalizedQuery.split(/\s+/).filter(Boolean);
+    const localMatches = this._fallbackPlantCatalog()
+      .filter((plant) => {
+        const haystack = [
+          plant.name,
+          plant.display_name,
+          plant.category,
+          ...(plant.aliases || []),
+        ].join(" ").toLowerCase();
+        return words.every((word) => haystack.includes(word));
+      })
+      .slice(0, 12);
+
+    if (!includeCustom || localMatches.length || normalizedQuery.length < 2) {
+      return localMatches;
+    }
+
+    return [{
+      id: 0,
+      name: normalizedQuery,
+      display_name: query.trim(),
+      category: "Custom plant",
+      description: "Local custom profile created from the search text.",
+      image_url: "",
+      moisture_min: 20,
+      moisture_max: 60,
+      temp_min: 0,
+      temp_max: 0,
+      air_humidity_min: 0,
+      air_humidity_max: 0,
+    }];
+  }
+
+  _fallbackPlantCatalog() {
+    return [
+      { name: "basil", display_name: "Basil", category: "Herb", aliases: ["ocimum basilicum"], moisture_min: 35, moisture_max: 65, temp_min: 18, temp_max: 30, air_humidity_min: 40, air_humidity_max: 70 },
+      { name: "mint", display_name: "Mint", category: "Herb", aliases: ["mentha"], moisture_min: 45, moisture_max: 75, temp_min: 15, temp_max: 28, air_humidity_min: 45, air_humidity_max: 75 },
+      { name: "parsley", display_name: "Parsley", category: "Herb", aliases: ["petroselinum crispum"], moisture_min: 35, moisture_max: 65, temp_min: 12, temp_max: 26, air_humidity_min: 40, air_humidity_max: 70 },
+      { name: "tomato", display_name: "Tomato", category: "Vegetable", aliases: ["solanum lycopersicum"], moisture_min: 40, moisture_max: 70, temp_min: 18, temp_max: 30, air_humidity_min: 40, air_humidity_max: 70 },
+      { name: "monstera", display_name: "Monstera deliciosa", category: "Houseplant", aliases: ["monstera"], moisture_min: 25, moisture_max: 55, temp_min: 18, temp_max: 30, air_humidity_min: 50, air_humidity_max: 80 },
+      { name: "pothos", display_name: "Pothos", category: "Houseplant", aliases: ["epipremnum aureum", "devil's ivy"], moisture_min: 20, moisture_max: 55, temp_min: 18, temp_max: 30, air_humidity_min: 40, air_humidity_max: 80 },
+      { name: "snake plant", display_name: "Snake plant", category: "Houseplant", aliases: ["sansevieria", "dracaena trifasciata"], moisture_min: 10, moisture_max: 35, temp_min: 15, temp_max: 30, air_humidity_min: 30, air_humidity_max: 60 },
+      { name: "peace lily", display_name: "Peace lily", category: "Houseplant", aliases: ["spathiphyllum"], moisture_min: 35, moisture_max: 65, temp_min: 18, temp_max: 30, air_humidity_min: 45, air_humidity_max: 80 },
+      { name: "hibiscus", display_name: "Hibiscus rosa-sinensis", category: "Flowering plant", aliases: ["hibiscus rosa sinensis"], moisture_min: 30, moisture_max: 65, temp_min: 16, temp_max: 32, air_humidity_min: 40, air_humidity_max: 75 },
+      { name: "pelargonium", display_name: "Pelargonium", category: "Flowering plant", aliases: ["geranium"], moisture_min: 20, moisture_max: 50, temp_min: 12, temp_max: 28, air_humidity_min: 35, air_humidity_max: 65 },
+    ];
   }
 
   _selectPlantCatalogItem(index) {
@@ -1271,7 +1378,7 @@ class GrowcubeCard extends HTMLElement {
 
   async _ensureAboutProfileData(entities) {
     const current = this._profileMetadata(entities);
-    if (this._profileHasDetails(current) || !this._hass?.callApi) {
+    if (this._profileHasDetails(current)) {
       return;
     }
     const plantName = this._plantName();
@@ -1283,11 +1390,7 @@ class GrowcubeCard extends HTMLElement {
     this._aboutProfileLoading = true;
     this._render();
     try {
-      const result = await this._hass.callApi(
-        "GET",
-        `growcube/plants/search?query=${encodeURIComponent(query)}`,
-      );
-      const item = this._selectCatalogProfile(result?.plants, query);
+      const item = this._selectCatalogProfile(await this._catalogSearch(query), query);
       if (item) {
         this._aboutProfileCache[cacheKey] = {
           category: this._normalizeProfileText(item.category),
