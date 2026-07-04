@@ -44,7 +44,7 @@ OPTIONS_PATH = DATA_DIR / "options.json"
 APP_DIR = Path(__file__).parent
 CARD_SOURCE_PATH = APP_DIR / "www" / "growcube-card.js"
 CARD_IMAGE_SOURCE_DIR = APP_DIR / "www" / "images"
-CARD_VERSION = "0.2.14"
+CARD_VERSION = "0.2.15"
 CARD_API_URL_PLACEHOLDER = "__GROWCUBE_ADDON_API_URL__"
 DEFAULT_INGRESS_PORT = 8099
 CLOUD_CATALOG_HOSTS = ("https://api.growcube.cc", "http://api.growcube.cc")
@@ -240,6 +240,20 @@ class GrowCubeManager:
                 "history": channel_state.history,
                 "watering_events": channel_state.watering_events,
             }
+
+    def apply_watering_payload(self, device_id: str, channel_value: str) -> dict[str, Any]:
+        channel = validate_channel_key(channel_value)
+        state = self.find_device(device_id) if device_id else next(iter(self.devices.values()), None)
+        if state is None:
+            raise KeyError("device not found")
+        future = self.submit(self.apply_watering_config(state.id, channel))
+        future.result(timeout=5)
+        return {
+            "ok": True,
+            "device_id": mqtt_device_unique_id(self._state_to_dict(state)),
+            "channel": "abcd"[channel],
+            "mode": state.channels[channel].config.mode,
+        }
 
     def _dashboard_device(self, state: DeviceState) -> dict[str, Any]:
         device = self._state_to_dict(state)
@@ -478,6 +492,10 @@ class GrowCubeManager:
             await self.request_history(state.id, channel)
         elif channel is not None and key.startswith("save_schedule_"):
             await self.apply_watering_config(state.id, channel)
+        elif channel is not None and key.startswith("add_plant_"):
+            mode = state.channels[channel].config.mode
+            if mode in {"Smart", "Repeating"}:
+                await self.apply_watering_config(state.id, channel)
 
     def find_device(self, device_key: str) -> DeviceState | None:
         with self.lock:
@@ -846,6 +864,13 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
                         first_query_value(params, "device_id"),
                         first_query_value(params, "channel") or "a",
                         first_query_value(params, "request") == "1",
+                    )
+                )
+            elif parsed.path == "/apply_watering":
+                self._write_json(
+                    manager.apply_watering_payload(
+                        first_query_value(params, "device_id"),
+                        first_query_value(params, "channel") or "a",
                     )
                 )
             else:

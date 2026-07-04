@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.14-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.15-addon-compat";
 const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
@@ -834,6 +834,15 @@ class GrowcubeCard extends HTMLElement {
     return {};
   }
 
+  async _applyWateringApi(channel = this._channelKey()) {
+    const params = new URLSearchParams({ channel });
+    const deviceId = this._deviceIdHint();
+    if (deviceId) {
+      params.set("device_id", deviceId);
+    }
+    return this._fetchAddonApi(`apply_watering?${params.toString()}`);
+  }
+
   _entityDisplay(entityId, fallback = "Unknown") {
     const state = this._state(entityId);
     if (!state || state.state === "unknown" || state.state === "unavailable") {
@@ -1308,6 +1317,8 @@ class GrowcubeCard extends HTMLElement {
       if (this._plantWizardMode === "Smart" || this._plantWizardMode === "Repeating") {
         if (entities.save) {
           await this._press(entities.save);
+        } else {
+          await this._applyWateringApi(channel);
         }
       }
       this._plantWizardOpen = false;
@@ -4554,6 +4565,8 @@ class GrowcubeCard extends HTMLElement {
     const save = this._entities().save;
     if (save) {
       await this._press(save);
+    } else {
+      await this._applyWateringApi();
     }
     this._showToast(message);
   }
