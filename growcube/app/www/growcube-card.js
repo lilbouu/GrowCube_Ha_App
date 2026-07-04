@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.12-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.14-addon-compat";
 const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
@@ -301,7 +301,8 @@ class GrowcubeCard extends HTMLElement {
       history_count: this._mqttEntity("sensor", prefix, `history_count_${channel}`),
       next_watering: this._mqttEntity("sensor", prefix, `next_watering_${channel}`),
       mode: this._mqttEntity("select", prefix, `watering_mode_${channel}`),
-      first_watering_time: this._mqttEntity("time", prefix, `first_watering_time_${channel}`),
+      first_watering_time: this._mqttEntity("text", prefix, `first_watering_time_${channel}`)
+        || this._mqttEntity("time", prefix, `first_watering_time_${channel}`),
       duration: this._mqttEntity("number", prefix, `duration_seconds_${channel}`),
       interval: this._mqttEntity("number", prefix, `interval_hours_${channel}`),
       smart_min_moisture: this._mqttEntity("number", prefix, `smart_min_moisture_${channel}`),
@@ -450,7 +451,9 @@ class GrowcubeCard extends HTMLElement {
       last_watering: mappedChannelEntities.last_watering || this._entityBySuffix("sensor", `_last_watering_${channel}`),
       next_watering: mappedChannelEntities.next_watering || this._entityBySuffix("sensor", `_next_watering_${channel}`),
       mode: mappedChannelEntities.mode || this._entityBySuffix("select", `_watering_mode_${channel}`),
-      first_watering_time: mappedChannelEntities.first_watering_time || this._entityBySuffix("time", `_first_watering_time_${channel}`),
+      first_watering_time: mappedChannelEntities.first_watering_time
+        || this._entityBySuffix("text", `_first_watering_time_${channel}`)
+        || this._entityBySuffix("time", `_first_watering_time_${channel}`),
       duration: mappedChannelEntities.duration || this._entityBySuffixFiltered(
         "number",
         [`_watering_amount_${channel}`, `_duration_seconds_${channel}`],
@@ -907,6 +910,10 @@ class GrowcubeCard extends HTMLElement {
   }
 
   async _setTime(entityId, value) {
+    if (String(entityId || "").startsWith("text.")) {
+      await this._setText(entityId, value.length === 5 ? `${value}:00` : value);
+      return;
+    }
     await this._call("time", "set_value", {
       entity_id: entityId,
       time: value.length === 5 ? `${value}:00` : value,

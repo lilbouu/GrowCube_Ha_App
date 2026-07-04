@@ -291,12 +291,13 @@ class MqttBridge:
             await self._switch(unique_id, f"smart_daytime_watering_{channel_id}", f"Daytime watering {channel_name}", base, device_info, "mdi:white-balance-sunny", f"{{{{ 'ON' if {channel_base}.config.smart_daytime_watering else 'OFF' }}}}")
             await self._text(unique_id, f"plant_name_{channel_id}", f"Plant name {channel_name}", base, device_info, 64, "mdi:flower", f"{{{{ {channel_base}.config.plant_name }}}}")
             await self._text(unique_id, f"plant_photo_url_{channel_id}", f"Plant photo URL {channel_name}", base, device_info, 512, "mdi:image-outline", f"{{{{ {channel_base}.config.photo_url }}}}")
-            await self._time(unique_id, f"first_watering_time_{channel_id}", f"First watering {channel_name}", base, device_info, "mdi:clock-outline", f"{{{{ {channel_base}.config.first_watering_time }}}}")
+            await self._text(unique_id, f"first_watering_time_{channel_id}", f"First watering {channel_name}", base, device_info, 8, "mdi:clock-outline", f"{{{{ {channel_base}.config.first_watering_time }}}}")
 
     async def _clear_legacy_configs(self, device_id: str) -> None:
         assert self.client is not None
         legacy = [("binary_sensor", "connected")]
         legacy.extend(("binary_sensor", f"pump_{channel}") for channel in "abcd")
+        legacy.extend(("time", f"first_watering_time_{channel}") for channel in "abcd")
         for component, key in legacy:
             topic = f"homeassistant/{component}/growcube/{device_id}_{key}/config"
             await self.client.publish(topic, "", retain=True)
@@ -463,7 +464,7 @@ class MqttBridge:
         availability = "online" if device.get("connected") else "offline"
         await self.client.publish(f"{base}/availability", availability, retain=True)
         await self.client.publish(f"{base}/state", json.dumps(device, separators=(",", ":")), retain=True)
-        LOGGER.info("Published MQTT state for GrowCube device %s (%s)", unique_id, availability)
+        LOGGER.debug("Published MQTT state for GrowCube device %s (%s)", unique_id, availability)
 
 
 def _device_unique_id(device: dict) -> str:

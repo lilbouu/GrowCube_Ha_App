@@ -12,7 +12,7 @@ import shutil
 import threading
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import Request, urlopen
 
 from growcube_client import (
+    Command,
     DeviceVersionReport,
     GrowCubeClient,
     HistoryCompleteReport,
@@ -30,6 +31,7 @@ from growcube_client import (
     WaterStateReport,
     WateringRecordReport,
 )
+from growcube_protocol import scheduled_watering_payload, watering_mode_payload
 from mqtt_bridge import MqttBridge, MqttOptions
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
@@ -42,7 +44,7 @@ OPTIONS_PATH = DATA_DIR / "options.json"
 APP_DIR = Path(__file__).parent
 CARD_SOURCE_PATH = APP_DIR / "www" / "growcube-card.js"
 CARD_IMAGE_SOURCE_DIR = APP_DIR / "www" / "images"
-CARD_VERSION = "0.2.12"
+CARD_VERSION = "0.2.14"
 CARD_API_URL_PLACEHOLDER = "__GROWCUBE_ADDON_API_URL__"
 DEFAULT_INGRESS_PORT = 8099
 CLOUD_CATALOG_HOSTS = ("https://api.growcube.cc", "http://api.growcube.cc")
@@ -317,11 +319,60 @@ class GrowCubeManager:
             self.touch_locked(state)
         await runtime.client.request_history(channel)
 
+    async def apply_watering_config(self, device_id: str, channel: int) -> None:
+        runtime = self.runtimes.get(device_id)
+        if runtime is None or runtime.client is None or not runtime.client.connected:
+            raise RuntimeError("device is not connected")
+        channel = validate_channel(channel)
+        config = self.devices[device_id].channels[channel].config
+        mode = config.mode
+        if mode == "Repeating":
+            duration = watering_duration_seconds(config.amount_ml or config.duration_seconds)
+            interval = max(1, int(config.interval_hours or 24))
+            start_time = next_watering_datetime(config.first_watering_time)
+            LOGGER.info(
+                "Apply timed watering device=%s channel=%s amount_ml=%s duration_s=%s interval_h=%s first=%s",
+                self.devices[device_id].host,
+                CHANNEL_NAMES[channel],
+                config.amount_ml,
+                duration,
+                interval,
+                start_time.isoformat(),
+            )
+            await runtime.client.send(Command(51, scheduled_watering_payload(channel, duration, interval, start_time)))
+        elif mode == "Smart":
+            smart_mode = 3 if config.smart_daytime_watering else 2
+            LOGGER.info(
+                "Apply smart watering device=%s channel=%s protocol_mode=%s min=%s max=%s daytime=%s",
+                self.devices[device_id].host,
+                CHANNEL_NAMES[channel],
+                smart_mode,
+                config.smart_min_moisture,
+                config.smart_max_moisture,
+                config.smart_daytime_watering,
+            )
+            await runtime.client.send(
+                Command(
+                    49,
+                    watering_mode_payload(
+                        channel,
+                        smart_mode,
+                        config.smart_min_moisture,
+                        config.smart_max_moisture,
+                    ),
+                )
+            )
+        else:
+            LOGGER.info("Disable watering device=%s channel=%s", self.devices[device_id].host, CHANNEL_NAMES[channel])
+            await runtime.client.send(Command(49, watering_mode_payload(channel, 0, 0, 0)))
+
     async def handle_mqtt_command(self, device_key: str, topic_key: str, payload: str) -> None:
         state = self.find_device(device_key)
         if state is None:
             LOGGER.warning("Ignoring MQTT command for unknown GrowCube device %s", device_key)
             return
+
+        LOGGER.info("MQTT command device=%s topic=%s payload=%r", state.host, topic_key, payload)
 
         if topic_key != "command":
             await self.handle_entity_command(state, topic_key, payload)
@@ -342,13 +393,16 @@ class GrowCubeManager:
 
     async def handle_entity_command(self, state: DeviceState, key: str, payload: str) -> None:
         channel = channel_from_key(key)
+        changed = ""
         async with self.async_lock:
             if key == "tank_capacity":
                 state.tank_capacity_ml = clamp_int(payload, 500, 50000, state.tank_capacity_ml)
                 state.tank_remaining_ml = min(state.tank_remaining_ml, state.tank_capacity_ml)
+                changed = f"tank_capacity={state.tank_capacity_ml}"
             elif key == "mark_tank_full":
                 state.tank_remaining_ml = state.tank_capacity_ml
                 state.tank_used_ml = 0
+                changed = "tank marked full"
             elif channel is not None:
                 config = state.channels[channel].config
                 if key.startswith("water_plant_"):
@@ -361,40 +415,59 @@ class GrowCubeManager:
                     pass
                 elif key.startswith("plant_name_"):
                     config.plant_name = payload.strip()[:64]
+                    changed = f"plant_name={config.plant_name!r}"
                 elif key.startswith("plant_photo_url_"):
                     config.photo_url = payload.strip()[:512]
+                    changed = "plant_photo_url updated"
                 elif key.startswith("watering_mode_"):
                     config.mode = payload if payload in {"Disabled", "Repeating", "Smart"} else "Disabled"
+                    changed = f"mode={config.mode}"
                 elif key.startswith("manual_duration_seconds_"):
                     config.manual_duration_seconds = clamp_int(payload, 30, 150, config.manual_duration_seconds)
+                    changed = f"manual_amount_ml={config.manual_duration_seconds}"
                 elif key.startswith("duration_seconds_"):
                     config.duration_seconds = clamp_int(payload, 10, 500, config.duration_seconds)
                     config.amount_ml = config.duration_seconds
+                    changed = f"amount_ml={config.amount_ml}"
                 elif key.startswith("interval_hours_"):
                     config.interval_hours = clamp_int(payload, 1, 240, config.interval_hours)
+                    changed = f"interval_hours={config.interval_hours}"
                 elif key.startswith("first_watering_time_"):
                     config.first_watering_time = normalize_time(payload, config.first_watering_time)
+                    changed = f"first_watering_time={config.first_watering_time}"
                 elif key.startswith("smart_min_moisture_"):
                     config.smart_min_moisture = clamp_int(payload, 1, max(1, config.smart_max_moisture - 1), config.smart_min_moisture)
+                    changed = f"smart_min={config.smart_min_moisture}"
                 elif key.startswith("smart_max_moisture_"):
                     config.smart_max_moisture = clamp_int(payload, min(99, config.smart_min_moisture + 1), 99, config.smart_max_moisture)
+                    changed = f"smart_max={config.smart_max_moisture}"
                 elif key.startswith("smart_daytime_watering_"):
                     config.smart_daytime_watering = payload.upper() in {"ON", "TRUE", "1"}
+                    changed = f"smart_daytime={config.smart_daytime_watering}"
                 elif key.startswith("add_plant_"):
                     state.channels[channel].plant_configured = True
                     config.configured = True
+                    changed = "plant configured"
                 elif key.startswith("reset_plant_"):
                     state.channels[channel].plant_configured = False
                     config.configured = False
                     config.plant_name = ""
                     config.photo_url = ""
                     config.mode = "Disabled"
+                    changed = "plant reset"
                 else:
                     LOGGER.warning("Ignoring unsupported MQTT entity command %s", key)
                     return
             else:
                 LOGGER.warning("Ignoring unsupported MQTT entity command %s", key)
                 return
+            if changed:
+                LOGGER.info(
+                    "Updated config device=%s channel=%s %s",
+                    state.host,
+                    CHANNEL_NAMES[channel] if channel is not None else "-",
+                    changed,
+                )
             self.touch_locked(state)
 
         if channel is not None and key.startswith("water_plant_"):
@@ -403,6 +476,8 @@ class GrowCubeManager:
             await self.stop_watering(state.id, channel)
         elif channel is not None and key.startswith("load_history_"):
             await self.request_history(state.id, channel)
+        elif channel is not None and key.startswith("save_schedule_"):
+            await self.apply_watering_config(state.id, channel)
 
     def find_device(self, device_key: str) -> DeviceState | None:
         with self.lock:
@@ -721,6 +796,16 @@ def watering_duration_seconds(amount_ml: int) -> int:
     return max(4, min(60, seconds))
 
 
+def next_watering_datetime(value: str) -> datetime:
+    normalized = normalize_time(value, "08:00:00")
+    hour, minute, second = (int(part) for part in normalized.split(":"))
+    now = datetime.now().astimezone()
+    start = now.replace(hour=hour, minute=minute, second=second, microsecond=0)
+    if start <= now:
+        start = start + timedelta(days=1)
+    return start
+
+
 def mqtt_safe_id(value: str) -> str:
     return "".join(char.lower() if char.isalnum() else "_" for char in value).strip("_")
 
@@ -750,7 +835,9 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
                 self._write_json({"ok": True})
             elif parsed.path == "/plants/search":
                 query = first_query_value(params, "query")
-                self._write_json({"plants": search_plants(query)})
+                plants = search_plants(query)
+                LOGGER.info("Plant search query=%r results=%s", query, len(plants))
+                self._write_json({"plants": plants})
             elif parsed.path == "/dashboard":
                 self._write_json(manager.dashboard_payload())
             elif parsed.path == "/history":
@@ -806,6 +893,7 @@ def search_plants(query: str) -> list[dict[str, Any]]:
     query = query.strip()
     if len(query) < 2:
         return []
+    LOGGER.info("Searching GrowCube cloud catalog for %r", query)
     data = fetch_catalog_json(f"/api/en/plants/name/{quote(query, safe='')}")
     plants = data.get("plants")
     if not isinstance(plants, list):
@@ -880,7 +968,7 @@ def dashboard_channel_entities(device_id: str, channel: str) -> dict[str, str]:
         "history_count": entity_id("sensor", device_id, f"history_count_{channel}"),
         "next_watering": entity_id("sensor", device_id, f"next_watering_{channel}"),
         "mode": entity_id("select", device_id, f"watering_mode_{channel}"),
-        "first_watering_time": entity_id("time", device_id, f"first_watering_time_{channel}"),
+        "first_watering_time": entity_id("text", device_id, f"first_watering_time_{channel}"),
         "duration": entity_id("number", device_id, f"duration_seconds_{channel}"),
         "interval": entity_id("number", device_id, f"interval_hours_{channel}"),
         "smart_min_moisture": entity_id("number", device_id, f"smart_min_moisture_{channel}"),

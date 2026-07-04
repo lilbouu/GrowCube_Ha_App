@@ -80,6 +80,14 @@ def manual_watering_payload(channel: int, enabled: bool) -> str:
     return f"{channel_payload(channel)}@{1 if enabled else 0}"
 
 
+def watering_mode_payload(channel: int, mode: int, first_value: int, second_value: int) -> str:
+    return f"{channel_payload(channel)}@{mode}@{first_value}@{second_value}"
+
+
+def scheduled_watering_payload(channel: int, duration: int, interval: int, start_time: datetime) -> str:
+    return f"{channel_payload(channel)}@{duration}@{interval}@{growcube_local_epoch(start_time)}"
+
+
 def time_sync_payload(value: datetime) -> str:
     return value.strftime("%Y@%m@%d@%H@%M@%S")
 
@@ -100,4 +108,3 @@ def growcube_local_epoch(value: datetime) -> int:
         tzinfo=timezone.utc,
     )
     return int(growcube_dt.timestamp())
-

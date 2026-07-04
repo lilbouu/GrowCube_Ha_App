@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from enum import IntEnum
@@ -17,6 +18,7 @@ from growcube_protocol import (
 )
 
 GROWCUBE_PORT = 8800
+LOGGER = logging.getLogger("growcube-addon.client")
 
 
 class Channel(IntEnum):
@@ -149,6 +151,7 @@ class GrowCubeClient:
         if self._writer is None or self._writer.is_closing():
             return
         data = command.to_bytes() if isinstance(command, Command) else command
+        LOGGER.info("GrowCube TX %s:%s %s", self.host, self.port, data.decode("ascii", errors="replace"))
         self._writer.write(data)
         await self._writer.drain()
 
@@ -180,6 +183,7 @@ class GrowCubeClient:
                     break
                 buffer.extend(chunk)
                 for message in parse_messages(buffer):
+                    LOGGER.info("GrowCube RX %s:%s %s", self.host, self.port, message.raw)
                     await _maybe_call(self.on_report, report_from_message(message.command, message.payload, message.raw))
         except asyncio.CancelledError:
             return
@@ -265,4 +269,3 @@ def _safe_int(value: str) -> int:
         return int(value)
     except ValueError:
         return 0
-
