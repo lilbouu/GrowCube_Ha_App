@@ -10,6 +10,7 @@ class GrowcubeMqttCard extends HTMLElement {
     this._config = {
       title: "GrowCube",
       device: "",
+      entities: {},
       channel: "",
       detail: false,
       overview: "",
@@ -31,6 +32,101 @@ class GrowcubeMqttCard extends HTMLElement {
     if (this._config.device) {
       return this._sanitize(this._config.device);
     }
+    const indexed = this._entityIndex();
+    for (const key of ["moisture_a", "water_plant_a", "temperature", "connected"]) {
+      if (indexed[key]) {
+        return indexed[key].device || "growcube";
+      }
+    }
+    return "";
+  }
+
+  _entityIndex() {
+    const states = this._hass?.states || {};
+    const index = {};
+    Object.entries(states).forEach(([entityId, state]) => {
+      const domain = entityId.split(".", 1)[0];
+      if (!["sensor", "button", "binary_sensor"].includes(domain)) {
+        return;
+      }
+      const haystack = `${entityId} ${state.attributes?.friendly_name || ""}`.toLowerCase();
+      const key = this._keyFromText(haystack);
+      if (!key) {
+        return;
+      }
+      const looksGrowcube = haystack.includes("growcube") || [
+        "moisture_a",
+        "moisture_b",
+        "moisture_c",
+        "moisture_d",
+        "water_plant_a",
+        "water_plant_b",
+        "water_plant_c",
+        "water_plant_d",
+        "stop_watering_a",
+        "stop_watering_b",
+        "stop_watering_c",
+        "stop_watering_d",
+        "load_history_a",
+        "load_history_b",
+        "load_history_c",
+        "load_history_d",
+      ].includes(key);
+      if (!looksGrowcube) {
+        return;
+      }
+      if (index[key] && !entityId.includes("growcube")) {
+        return;
+      }
+      index[key] = {
+        entityId,
+        device: this._deviceFromEntityId(entityId, key),
+      };
+    });
+    return index;
+  }
+
+  _candidateEntities() {
+    const states = this._hass?.states || {};
+    return Object.keys(states)
+      .filter((entityId) => {
+        const state = states[entityId];
+        const text = `${entityId} ${state.attributes?.friendly_name || ""}`.toLowerCase();
+        return text.includes("growcube") || text.includes("moisture") || text.includes("water plant") || text.includes("watering");
+      })
+      .sort()
+      .slice(0, 14);
+  }
+
+  _keyFromText(text) {
+    const normalized = this._sanitize(text);
+    for (const channel of ["a", "b", "c", "d"]) {
+      if (normalized.includes(`moisture_${channel}`)) return `moisture_${channel}`;
+      if (normalized.includes(`pump_${channel}`)) return `pump_${channel}`;
+      if (normalized.includes(`water_plant_${channel}`)) return `water_plant_${channel}`;
+      if (normalized.includes(`stop_watering_${channel}`)) return `stop_watering_${channel}`;
+      if (normalized.includes(`load_history_${channel}`)) return `load_history_${channel}`;
+    }
+    if (normalized.includes("water_warning")) return "water_warning";
+    if (normalized.includes("connected")) return "connected";
+    if (normalized.includes("temperature")) return "temperature";
+    if (normalized.includes("humidity")) return "humidity";
+    return "";
+  }
+
+  _deviceFromEntityId(entityId, key) {
+    const normalized = this._sanitize(entityId.split(".").slice(1).join("."));
+    const withoutPrefix = normalized.startsWith("growcube_")
+      ? normalized.slice("growcube_".length)
+      : normalized;
+    const keyIndex = withoutPrefix.indexOf(`_${key}`);
+    if (keyIndex > 0) {
+      return withoutPrefix.slice(0, keyIndex);
+    }
+    return this._config.device ? this._sanitize(this._config.device) : "";
+  }
+
+  _legacyDeviceKey() {
     const states = this._hass?.states || {};
     const entityId = Object.keys(states).find((id) => /^(sensor|button|binary_sensor)\.growcube_.*_(temperature|moisture_a|water_plant_a)$/.test(id));
     if (!entityId) {
@@ -42,6 +138,13 @@ class GrowcubeMqttCard extends HTMLElement {
   }
 
   _entity(domain, key) {
+    if (this._config.entities?.[key]) {
+      return this._config.entities[key];
+    }
+    const indexed = this._entityIndex();
+    if (indexed[key]?.entityId) {
+      return indexed[key].entityId;
+    }
     const device = this._deviceKey();
     if (!device) {
       return "";
@@ -228,6 +331,21 @@ class GrowcubeMqttCard extends HTMLElement {
           color: var(--secondary-text-color);
           padding: 12px 0 2px;
         }
+        .debug-title {
+          margin-top: 12px;
+          color: var(--primary-text-color);
+          font-size: 12px;
+          font-weight: 650;
+        }
+        code {
+          display: block;
+          margin-top: 6px;
+          white-space: normal;
+          word-break: break-word;
+          font-size: 12px;
+          line-height: 1.5;
+          color: var(--primary-text-color);
+        }
         @media (max-width: 900px) {
           .metrics {
             grid-template-columns: 1fr;
@@ -260,7 +378,7 @@ class GrowcubeMqttCard extends HTMLElement {
               <span>${this._value(connected, "offline") === "on" ? "Connected" : "Disconnected"}</span>
             </div>
           </div>
-          ${device ? `
+          ${device || channels.some((channel) => this._state(channel.moisture) || this._state(channel.water)) ? `
             <div class="metrics">
               ${this._metric("Temperature", temperature)}
               ${this._metric("Humidity", humidity)}
@@ -272,6 +390,10 @@ class GrowcubeMqttCard extends HTMLElement {
           ` : `
             <div class="empty">
               No GrowCube MQTT entities found yet. Check that the GrowCube add-on is running and MQTT Discovery is enabled.
+              ${this._candidateEntities().length ? `
+                <div class="debug-title">Found possible entities:</div>
+                <code>${this._candidateEntities().join("<br>")}</code>
+              ` : ""}
             </div>
           `}
         </div>

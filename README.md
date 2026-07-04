@@ -32,7 +32,7 @@ The first add-on version includes:
 - moisture sensors for channels A-D
 - pump/water warning binary sensors
 - manual watering, stop, and history buttons for channels A-D
-- custom Lovelace card copied to `/config/www/growcube/growcube-card.js`
+- custom Lovelace card copied to `/homeassistant/www/growcube/growcube-card.js`
 - portable dashboard YAML in `docs/lovelace-growcube-mqtt-dashboard.yaml`
 
 ## Install In HAOS
@@ -103,23 +103,23 @@ The add-on configuration and stored state under `/data` should remain in place.
 The add-on copies its Lovelace card to:
 
 ```text
-/config/www/growcube/growcube-card.js
+/homeassistant/www/growcube/growcube-card.js
 ```
 
 The GrowCube add-on log should contain:
 
 ```text
-GrowCube Lovelace card copied to /config/www/growcube/growcube-card.js
+GrowCube Lovelace card copied to /homeassistant/www/growcube/growcube-card.js
 ```
 
 Home Assistant serves that file as:
 
 ```text
-/local/growcube/growcube-card.js
+/local/growcube/growcube-card.js?v=0.2.5
 ```
 
 If this URL returns `404 Not Found`, check that the log line above is present.
-If `/config/www` did not exist before, restart Home Assistant Core once so the
+If `/homeassistant/www` did not exist before, restart Home Assistant Core once so the
 `/local` static path is picked up.
 
 Add it as a Lovelace resource:
@@ -129,7 +129,7 @@ Add it as a Lovelace resource:
 3. Add a JavaScript module resource:
 
 ```text
-/local/growcube/growcube-card.js
+/local/growcube/growcube-card.js?v=0.2.5
 ```
 
 Then create or edit a dashboard and add a manual card:
@@ -152,6 +152,23 @@ GrowCube devices are present, pass the sanitized device host explicitly:
 type: custom:growcube-card
 title: GrowCube Office
 device: 192_168_1_50
+```
+
+If Home Assistant generated unexpected entity IDs, pass them explicitly:
+
+```yaml
+type: custom:growcube-card
+title: GrowCube
+entities:
+  temperature: sensor.growcube_temperature
+  humidity: sensor.growcube_humidity
+  connected: binary_sensor.growcube_connected
+  water_warning: binary_sensor.growcube_water_warning
+  moisture_a: sensor.growcube_moisture_a
+  pump_a: binary_sensor.growcube_pump_a
+  water_plant_a: button.growcube_water_plant_a
+  stop_watering_a: button.growcube_stop_watering_a
+  load_history_a: button.growcube_load_history_a
 ```
 
 ## Notes
