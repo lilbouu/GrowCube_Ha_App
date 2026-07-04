@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import ipaddress
 import json
 import logging
 import os
@@ -47,7 +48,7 @@ OPTIONS_PATH = DATA_DIR / "options.json"
 APP_DIR = Path(__file__).parent
 CARD_SOURCE_PATH = APP_DIR / "www" / "growcube-card.js"
 CARD_IMAGE_SOURCE_DIR = APP_DIR / "www" / "images"
-CARD_VERSION = "0.2.20"
+CARD_VERSION = "0.2.21"
 CARD_API_URL_PLACEHOLDER = "__GROWCUBE_ADDON_API_URL__"
 DEFAULT_INGRESS_PORT = 8099
 CLOUD_CATALOG_HOSTS = ("https://api.growcube.cc", "http://api.growcube.cc")
@@ -1147,12 +1148,29 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
             LOGGER.exception("GrowCube ingress API request failed: %s", self.path)
             self._write_json({"error": str(err)}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
+    def do_OPTIONS(self) -> None:
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self._send_cors_headers()
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def log_message(self, format: str, *args: Any) -> None:
         LOGGER.debug("Ingress API: " + format, *args)
 
     def _allow_request(self) -> bool:
         host = self.client_address[0]
-        return host in {"127.0.0.1", "::1", "172.30.32.2"} or host.startswith("172.30.")
+        if host in {"127.0.0.1", "::1", "172.30.32.2"} or host.startswith("172.30."):
+            return True
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            return False
+        return address.is_private or address.is_loopback
+
+    def _send_cors_headers(self) -> None:
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Accept, Content-Type")
 
     def _write_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -1164,6 +1182,7 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
             len(body),
         )
         self.send_response(int(status))
+        self._send_cors_headers()
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))

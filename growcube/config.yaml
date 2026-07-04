@@ -1,5 +1,5 @@
 name: GrowCube
-version: "0.2.20"
+version: "0.2.21"
 slug: growcube
 description: GrowCube device bridge for Home Assistant OS
 url: https://github.com/lilbouu/GrowCube_Ha_App
@@ -36,7 +36,10 @@ schema:
   mqtt_port: int
   mqtt_username: str?
   mqtt_password: password?
-ports: {}
+ports:
+  8099/tcp: 8099
+ports_description:
+  8099/tcp: GrowCube add-on API
 map:
   - type: homeassistant_config
     read_only: false

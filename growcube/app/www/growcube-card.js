@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.20-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.21-addon-compat";
 const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
@@ -236,12 +236,31 @@ class GrowcubeCard extends HTMLElement {
       console.info("[GrowCube] using add-on API URL from entity state", { url: this._addonApiUrlCache });
       return this._addonApiUrlCache;
     }
+    const directUrl = this._directAddonApiUrl();
+    if (directUrl) {
+      this._addonApiUrlCache = directUrl;
+      console.info("[GrowCube] using direct add-on API URL", { url: this._addonApiUrlCache });
+      return this._addonApiUrlCache;
+    }
     const discoveredUrl = await this._discoverAddonApiUrl();
     if (discoveredUrl) {
       this._addonApiUrlCache = discoveredUrl;
     }
     console.info("[GrowCube] discovered add-on API URL", { url: discoveredUrl });
     return discoveredUrl;
+  }
+
+  _directAddonApiUrl() {
+    const configured = this._config.direct_addon_api_url || window.GROWCUBE_DIRECT_ADDON_API_URL || "";
+    const configuredUrl = this._normalizeAddonApiUrl(configured);
+    if (configuredUrl) {
+      return configuredUrl;
+    }
+    const { protocol, hostname } = window.location || {};
+    if (!hostname) {
+      return "";
+    }
+    return `${protocol || "http:"}//${hostname}:8099`;
   }
 
   _addonApiUrlFromState() {
@@ -326,7 +345,8 @@ class GrowcubeCard extends HTMLElement {
     }
     if (/^https?:\/\//i.test(text)) {
       try {
-        return new URL(text).pathname.replace(/\/+$/, "");
+        const url = new URL(text);
+        return `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
       } catch (error) {
         return "";
       }
