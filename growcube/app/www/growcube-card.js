@@ -1,4 +1,5 @@
-const GROWCUBE_CARD_VERSION = "0.2.10-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.12-addon-compat";
+const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
   constructor() {
@@ -152,7 +153,7 @@ class GrowcubeCard extends HTMLElement {
   }
 
   async _loadDashboardDevicesIfNeeded(force = false) {
-    if (!this._hass?.callApi) {
+    if (!this._hass) {
       return;
     }
     const cacheMs = 30 * 1000;
@@ -164,15 +165,167 @@ class GrowcubeCard extends HTMLElement {
     }
     this._dashboardDevicesLoading = true;
     try {
-      const result = await this._hass.callApi("GET", "growcube/dashboard");
+      const result = await this._dashboardApi();
       this._dashboardDevices = Array.isArray(result?.devices) ? result.devices : [];
+      if (!this._dashboardDevices.length || !this._dashboardHasKnownEntities(this._dashboardDevices)) {
+        this._dashboardDevices = this._discoverMqttDashboardDevices();
+      }
       this._dashboardDevicesLoadedAt = Date.now();
     } catch (error) {
+      this._dashboardDevices = this._discoverMqttDashboardDevices();
       this._dashboardDevicesLoadedAt = Date.now();
     } finally {
       this._dashboardDevicesLoading = false;
       this._render();
     }
+  }
+
+  async _dashboardApi() {
+    try {
+      const addonResult = await this._fetchAddonApi("dashboard");
+      if (addonResult) {
+        return addonResult;
+      }
+    } catch (error) {
+      // Fall back to the legacy HACS API or MQTT entity discovery below.
+    }
+    if (this._hass?.callApi) {
+      return this._hass.callApi("GET", "growcube/dashboard");
+    }
+    return {};
+  }
+
+  async _fetchAddonApi(path) {
+    const baseUrl = this._addonApiUrl();
+    if (!baseUrl) {
+      return undefined;
+    }
+    const response = await fetch(`${baseUrl}/${String(path).replace(/^\/+/, "")}`, {
+      credentials: "same-origin",
+      headers: {
+        "Accept": "application/json",
+      },
+    });
+    if (!response.ok) {
+      throw new Error(`GrowCube add-on API failed: ${response.status}`);
+    }
+    return response.json();
+  }
+
+  _addonApiUrl() {
+    const configured = this._config.addon_api_url || window.GROWCUBE_ADDON_API_URL || GROWCUBE_ADDON_API_URL || "";
+    const value = String(configured || "").trim();
+    if (!value || value === "__GROWCUBE_ADDON_API_URL__") {
+      return "";
+    }
+    return value.replace(/\/+$/, "");
+  }
+
+  _discoverMqttDashboardDevices() {
+    if (!this._hass?.states) {
+      return [];
+    }
+    const prefixes = new Set();
+    Object.keys(this._hass.states).forEach((entityId) => {
+      const objectId = entityId.split(".", 2)[1] || "";
+      [
+        "_temperature",
+        "_humidity",
+        "_tank_remaining",
+        "_tank_level",
+        "_moisture_a",
+        "_moisture_b",
+        "_moisture_c",
+        "_moisture_d",
+        "_load_history_a",
+        "_water_plant_a",
+      ].some((suffix) => {
+        if (objectId.startsWith("growcube_") && objectId.endsWith(suffix)) {
+          prefixes.add(objectId.slice(0, -suffix.length));
+          return true;
+        }
+        return false;
+      });
+    });
+    return Array.from(prefixes)
+      .sort()
+      .map((prefix) => this._mqttDashboardDevice(prefix))
+      .filter((device) => Object.values(device.entities).some(Boolean) || Object.values(device.channels).some((channel) => Object.values(channel).some(Boolean)));
+  }
+
+  _dashboardHasKnownEntities(devices) {
+    if (!this._hass?.states || !Array.isArray(devices)) {
+      return false;
+    }
+    return devices.some((device) => {
+      const deviceEntities = Object.values(device?.entities || {});
+      const channelEntities = Object.values(device?.channels || {})
+        .flatMap((channel) => Object.values(channel || {}));
+      return deviceEntities.concat(channelEntities).some((entityId) => entityId && this._hass.states[entityId]);
+    });
+  }
+
+  _mqttDashboardDevice(prefix) {
+    const temperature = this._mqttEntity("sensor", prefix, "temperature");
+    const name = this._state(temperature)?.attributes?.friendly_name
+      ? this._state(temperature).attributes.friendly_name.replace(/\s+Temperature$/i, "")
+      : prefix.replace(/^growcube_/, "GrowCube ").replace(/_/g, ".");
+    return {
+      device_id: prefix,
+      host: prefix.replace(/^growcube_/, "").replace(/_/g, "."),
+      name,
+      connected: this._entityState(this._mqttEntity("binary_sensor", prefix, "connection_problem"), "OFF") !== "ON",
+      entities: {
+        temperature,
+        humidity: this._mqttEntity("sensor", prefix, "humidity"),
+        connection_problem: this._mqttEntity("binary_sensor", prefix, "connection_problem"),
+        water_warning: this._mqttEntity("binary_sensor", prefix, "water_warning"),
+        device_locked: this._mqttEntity("binary_sensor", prefix, "device_locked"),
+        tank_remaining: this._mqttEntity("sensor", prefix, "tank_remaining"),
+        tank_level: this._mqttEntity("sensor", prefix, "tank_level"),
+        tank_days_left: this._mqttEntity("sensor", prefix, "tank_days_left"),
+        tank_capacity: this._mqttEntity("number", prefix, "tank_capacity"),
+        mark_tank_full: this._mqttEntity("button", prefix, "mark_tank_full"),
+      },
+      channels: Object.fromEntries(this._channels().map((channel) => [channel, this._mqttChannelEntities(prefix, channel)])),
+    };
+  }
+
+  _mqttChannelEntities(prefix, channel) {
+    return {
+      name: this._mqttEntity("text", prefix, `plant_name_${channel}`),
+      photo_url: this._mqttEntity("text", prefix, `plant_photo_url_${channel}`),
+      plant_configured: this._mqttEntity("binary_sensor", prefix, `plant_${channel}_configured`),
+      moisture: this._mqttEntity("sensor", prefix, `moisture_${channel}`),
+      last_watering: this._mqttEntity("sensor", prefix, `last_watering_${channel}`),
+      history_count: this._mqttEntity("sensor", prefix, `history_count_${channel}`),
+      next_watering: this._mqttEntity("sensor", prefix, `next_watering_${channel}`),
+      mode: this._mqttEntity("select", prefix, `watering_mode_${channel}`),
+      first_watering_time: this._mqttEntity("time", prefix, `first_watering_time_${channel}`),
+      duration: this._mqttEntity("number", prefix, `duration_seconds_${channel}`),
+      interval: this._mqttEntity("number", prefix, `interval_hours_${channel}`),
+      smart_min_moisture: this._mqttEntity("number", prefix, `smart_min_moisture_${channel}`),
+      smart_max_moisture: this._mqttEntity("number", prefix, `smart_max_moisture_${channel}`),
+      smart_daytime_watering: this._mqttEntity("switch", prefix, `smart_daytime_watering_${channel}`),
+      manual_duration: this._mqttEntity("number", prefix, `manual_duration_seconds_${channel}`),
+      add_plant: this._mqttEntity("button", prefix, `add_plant_${channel}`),
+      load_history: this._mqttEntity("button", prefix, `load_history_${channel}`),
+      save: this._mqttEntity("button", prefix, `save_schedule_${channel}`),
+      reset: this._mqttEntity("button", prefix, `reset_plant_${channel}`),
+      water: this._mqttEntity("button", prefix, `water_plant_${channel}`),
+      stop: this._mqttEntity("button", prefix, `stop_watering_${channel}`),
+      outlet_blocked: this._mqttEntity("binary_sensor", prefix, `outlet_${channel}_blocked`),
+      outlet_locked: this._mqttEntity("binary_sensor", prefix, `outlet_${channel}_locked`),
+      sensor_fault: this._mqttEntity("binary_sensor", prefix, `sensor_${channel}_fault`),
+      sensor_disconnected: this._mqttEntity("binary_sensor", prefix, `sensor_${channel}_disconnected`),
+      watering_issue: this._mqttEntity("binary_sensor", prefix, `watering_issue_${channel}`),
+      watering_locked: this._mqttEntity("binary_sensor", prefix, `watering_locked_${channel}`),
+    };
+  }
+
+  _mqttEntity(domain, prefix, key) {
+    const entityId = `${domain}.${prefix}_${key}`;
+    return this._hass?.states?.[entityId] ? entityId : "";
   }
 
   _channelKey(channelValue = undefined) {
@@ -294,6 +447,7 @@ class GrowcubeCard extends HTMLElement {
         `_plant_configured_${channel}`,
       ]),
       moisture: mappedChannelEntities.moisture || moisture,
+      last_watering: mappedChannelEntities.last_watering || this._entityBySuffix("sensor", `_last_watering_${channel}`),
       next_watering: mappedChannelEntities.next_watering || this._entityBySuffix("sensor", `_next_watering_${channel}`),
       mode: mappedChannelEntities.mode || this._entityBySuffix("select", `_watering_mode_${channel}`),
       first_watering_time: mappedChannelEntities.first_watering_time || this._entityBySuffix("time", `_first_watering_time_${channel}`),
@@ -603,7 +757,7 @@ class GrowcubeCard extends HTMLElement {
   }
 
   async _loadCubeHistoryApiIfNeeded(force = false) {
-    if (!this._hass?.callApi || !this._config?.detail) {
+    if (!this._hass || !this._config?.detail) {
       return;
     }
     const channel = this._channelKey();
@@ -627,7 +781,7 @@ class GrowcubeCard extends HTMLElement {
       if (deviceId) {
         params.set("device_id", deviceId);
       }
-      const result = await this._hass.callApi("GET", `growcube/history?${params.toString()}`);
+      const result = await this._historyApi(params);
       this._cubeHistory[channel] = result || {};
       this._cubeHistoryLoadedAt[channel] = Date.now();
     } catch (error) {
@@ -660,6 +814,21 @@ class GrowcubeCard extends HTMLElement {
       }
       this._render();
     }
+  }
+
+  async _historyApi(params) {
+    try {
+      const addonResult = await this._fetchAddonApi(`history?${params.toString()}`);
+      if (addonResult) {
+        return addonResult;
+      }
+    } catch (error) {
+      // Fall back to the legacy HACS API if the add-on API is not available.
+    }
+    if (this._hass?.callApi) {
+      return this._hass.callApi("GET", `growcube/history?${params.toString()}`);
+    }
+    return {};
   }
 
   _entityDisplay(entityId, fallback = "Unknown") {
@@ -1169,6 +1338,16 @@ class GrowcubeCard extends HTMLElement {
   }
 
   async _catalogSearch(query) {
+    try {
+      const result = await this._fetchAddonApi(`plants/search?query=${encodeURIComponent(query)}`);
+      const plants = Array.isArray(result?.plants) ? result.plants : [];
+      if (plants.length) {
+        return plants;
+      }
+    } catch (error) {
+      // The HAOS add-on ingress API may not be available on older installs.
+    }
+
     if (this._hass?.callApi) {
       try {
         const result = await this._hass.callApi(

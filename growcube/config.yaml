@@ -1,5 +1,5 @@
 name: GrowCube
-version: "0.2.10"
+version: "0.2.12"
 slug: growcube
 description: GrowCube device bridge for Home Assistant OS
 url: https://github.com/lilbouu/GrowCube_Ha_App
@@ -12,7 +12,11 @@ arch:
 startup: services
 boot: auto
 init: false
-ingress: false
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:sprout
+panel_title: GrowCube
+hassio_api: true
 homeassistant_api: false
 host_network: true
 services:

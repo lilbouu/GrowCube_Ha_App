@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
 import os
@@ -13,6 +15,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, quote, urlparse
+from urllib.request import Request, urlopen
 
 from growcube_client import (
     DeviceVersionReport,
@@ -37,7 +42,11 @@ OPTIONS_PATH = DATA_DIR / "options.json"
 APP_DIR = Path(__file__).parent
 CARD_SOURCE_PATH = APP_DIR / "www" / "growcube-card.js"
 CARD_IMAGE_SOURCE_DIR = APP_DIR / "www" / "images"
-CARD_VERSION = "0.2.10"
+CARD_VERSION = "0.2.12"
+CARD_API_URL_PLACEHOLDER = "__GROWCUBE_ADDON_API_URL__"
+DEFAULT_INGRESS_PORT = 8099
+CLOUD_CATALOG_HOSTS = ("https://api.growcube.cc", "http://api.growcube.cc")
+CLOUD_CATALOG_LIMIT = 40
 CARD_TARGET_PATHS = (
     Path("/homeassistant/www/growcube/growcube-card.js"),
     Path("/homeassistant_config/www/growcube/growcube-card.js"),
@@ -110,6 +119,7 @@ class DeviceRuntime:
         self.state = state
         self.client: GrowCubeClient | None = None
         self.task: asyncio.Task | None = None
+        self.pending_manual_amounts: dict[int, int] = {}
 
     async def connect(self) -> None:
         async with self.manager.async_lock:
@@ -196,6 +206,54 @@ class GrowCubeManager:
                 "now": now_iso(),
             }
 
+    def dashboard_payload(self) -> dict[str, Any]:
+        with self.lock:
+            devices = [self._dashboard_device(device) for device in self.devices.values()]
+        return {"devices": sorted(devices, key=lambda item: str(item["name"]).lower())}
+
+    def history_payload(self, device_id: str, channel_value: str, request_history: bool) -> dict[str, Any]:
+        channel = validate_channel_key(channel_value)
+        state = self.find_device(device_id) if device_id else next(iter(self.devices.values()), None)
+        if state is None:
+            raise KeyError("device not found")
+
+        if request_history:
+            self.submit(self.request_history(state.id, channel))
+
+        with self.lock:
+            channel_state = state.channels[channel]
+            return {
+                "device_id": mqtt_device_unique_id(self._state_to_dict(state)),
+                "channel": "abcd"[channel],
+                "history_loading": channel_state.history_loading or request_history,
+                "history_complete": channel_state.history_complete,
+                "watering_events_complete": channel_state.watering_events_complete,
+                "history_points": len(channel_state.history),
+                "type_category": "",
+                "type_description": "",
+                "temp_min": 0,
+                "temp_max": 0,
+                "air_humidity_min": 0,
+                "air_humidity_max": 0,
+                "history": channel_state.history,
+                "watering_events": channel_state.watering_events,
+            }
+
+    def _dashboard_device(self, state: DeviceState) -> dict[str, Any]:
+        device = self._state_to_dict(state)
+        device_id = mqtt_device_unique_id(device)
+        return {
+            "device_id": device_id,
+            "host": state.host,
+            "name": state.name or f"GrowCube {state.host}",
+            "connected": state.connected,
+            "entities": dashboard_device_entities(device_id),
+            "channels": {
+                channel: dashboard_channel_entities(device_id, channel)
+                for channel in "abcd"
+            },
+        }
+
     async def add_device(self, name: str, host: str, port: int = 8800) -> dict[str, Any]:
         host = host.strip()
         if not host:
@@ -230,11 +288,15 @@ class GrowCubeManager:
             self.runtimes[device_id] = runtime
         await runtime.connect()
 
-    async def water(self, device_id: str, channel: int, duration: int) -> None:
+    async def water(self, device_id: str, channel: int, amount_ml: int) -> None:
         runtime = self.runtimes.get(device_id)
         if runtime is None or runtime.client is None or not runtime.client.connected:
             raise RuntimeError("device is not connected")
-        await runtime.client.water(validate_channel(channel), max(1, min(60, int(duration))))
+        channel = validate_channel(channel)
+        amount_ml = clamp_int(amount_ml, 30, 150, 50)
+        duration = watering_duration_seconds(amount_ml)
+        runtime.pending_manual_amounts[channel] = amount_ml
+        await runtime.client.water(channel, duration)
 
     async def stop_watering(self, device_id: str, channel: int) -> None:
         runtime = self.runtimes.get(device_id)
@@ -272,7 +334,7 @@ class GrowCubeManager:
 
         channel = validate_channel(int(raw_channel))
         if action == "water":
-            await self.water(state.id, channel, 7)
+            await self.water(state.id, channel, state.channels[channel].config.manual_duration_seconds)
         elif action == "stop":
             await self.stop_watering(state.id, channel)
         elif action == "history":
@@ -349,6 +411,8 @@ class GrowCubeManager:
                     mqtt_safe_id(state.id),
                     mqtt_safe_id(state.device_id or ""),
                     mqtt_safe_id(state.host),
+                    f"growcube_{mqtt_safe_id(state.host)}",
+                    mqtt_device_unique_id(self._state_to_dict(state)),
                 }:
                     return state
         return None
@@ -391,7 +455,27 @@ class GrowCubeManager:
                 if report.temperature is not None:
                     state.temperature = report.temperature
             elif isinstance(report, PumpReport) and 0 <= report.channel < len(state.channels):
-                state.channels[report.channel].pump_open = report.open
+                channel = state.channels[report.channel]
+                channel.pump_open = report.open
+                if report.open:
+                    amount = None
+                    runtime = self.runtimes.get(device_id)
+                    if runtime is not None:
+                        amount = runtime.pending_manual_amounts.pop(report.channel, None)
+                    if amount is not None:
+                        timestamp = now_iso()
+                        channel.last_watering = timestamp
+                        if all(item.get("timestamp") != timestamp for item in channel.watering_events):
+                            channel.watering_events.append(
+                                {
+                                    "timestamp": timestamp,
+                                    "amount_ml": amount,
+                                }
+                            )
+                            channel.watering_events = sorted(
+                                channel.watering_events,
+                                key=lambda item: item["timestamp"],
+                            )[-128:]
             elif isinstance(report, MoistureHistoryReport) and 0 <= report.channel < len(state.channels):
                 channel = state.channels[report.channel]
                 existing = {point["timestamp"]: point for point in channel.history}
@@ -417,8 +501,8 @@ class GrowCubeManager:
                 channel = state.channels[report.channel]
                 timestamp = report.timestamp.replace(tzinfo=timezone.utc).isoformat()
                 channel.last_watering = timestamp
-                if all(item.get("timestamp") != timestamp for item in channel.watering_events):
-                    channel.watering_events.append({"timestamp": timestamp})
+                if all(abs_iso_seconds(item.get("timestamp"), timestamp) > 30 for item in channel.watering_events):
+                    channel.watering_events.append({"timestamp": timestamp, "amount_ml": None})
                     channel.watering_events = sorted(
                         channel.watering_events,
                         key=lambda item: item["timestamp"],
@@ -622,6 +706,21 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def abs_iso_seconds(first: Any, second: Any) -> float:
+    try:
+        first_dt = datetime.fromisoformat(str(first).replace("Z", "+00:00"))
+        second_dt = datetime.fromisoformat(str(second).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return float("inf")
+    return abs((first_dt - second_dt).total_seconds())
+
+
+def watering_duration_seconds(amount_ml: int) -> int:
+    amount_ml = max(30, int(amount_ml))
+    seconds = (amount_ml * 10 + 99) // 84
+    return max(4, min(60, seconds))
+
+
 def mqtt_safe_id(value: str) -> str:
     return "".join(char.lower() if char.isalnum() else "_" for char in value).strip("_")
 
@@ -636,10 +735,198 @@ def mqtt_options() -> MqttOptions:
     )
 
 
+class GrowCubeApiHandler(BaseHTTPRequestHandler):
+    server_version = "GrowCubeAddon/0.2"
+
+    def do_GET(self) -> None:
+        if not self._allow_request():
+            self._write_json({"error": "forbidden"}, HTTPStatus.FORBIDDEN)
+            return
+
+        parsed = urlparse(self.path)
+        params = parse_qs(parsed.query)
+        try:
+            if parsed.path in {"/", "/health"}:
+                self._write_json({"ok": True})
+            elif parsed.path == "/plants/search":
+                query = first_query_value(params, "query")
+                self._write_json({"plants": search_plants(query)})
+            elif parsed.path == "/dashboard":
+                self._write_json(manager.dashboard_payload())
+            elif parsed.path == "/history":
+                self._write_json(
+                    manager.history_payload(
+                        first_query_value(params, "device_id"),
+                        first_query_value(params, "channel") or "a",
+                        first_query_value(params, "request") == "1",
+                    )
+                )
+            else:
+                self._write_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
+        except KeyError as err:
+            self._write_json({"error": str(err)}, HTTPStatus.NOT_FOUND)
+        except ValueError as err:
+            self._write_json({"error": str(err)}, HTTPStatus.BAD_REQUEST)
+        except Exception as err:
+            LOGGER.exception("GrowCube ingress API request failed: %s", self.path)
+            self._write_json({"error": str(err)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def log_message(self, format: str, *args: Any) -> None:
+        LOGGER.debug("Ingress API: " + format, *args)
+
+    def _allow_request(self) -> bool:
+        host = self.client_address[0]
+        return host in {"127.0.0.1", "::1", "172.30.32.2"} or host.startswith("172.30.")
+
+    def _write_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        self.send_response(int(status))
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def start_ingress_api_server() -> ThreadingHTTPServer:
+    port = int(os.environ.get("GROWCUBE_INGRESS_PORT") or DEFAULT_INGRESS_PORT)
+    server = ThreadingHTTPServer(("0.0.0.0", port), GrowCubeApiHandler)
+    thread = threading.Thread(target=server.serve_forever, name="growcube-ingress-api", daemon=True)
+    thread.start()
+    LOGGER.info("GrowCube ingress API listening on port %s", port)
+    return server
+
+
+def first_query_value(params: dict[str, list[str]], key: str) -> str:
+    values = params.get(key) or []
+    return str(values[0]).strip() if values else ""
+
+
+def search_plants(query: str) -> list[dict[str, Any]]:
+    query = query.strip()
+    if len(query) < 2:
+        return []
+    data = fetch_catalog_json(f"/api/en/plants/name/{quote(query, safe='')}")
+    plants = data.get("plants")
+    if not isinstance(plants, list):
+        return []
+    return [plant_from_api(plant) for plant in plants[:CLOUD_CATALOG_LIMIT] if isinstance(plant, dict)]
+
+
+def fetch_catalog_json(path: str) -> dict[str, Any]:
+    last_error: Exception | None = None
+    for host in CLOUD_CATALOG_HOSTS:
+        request = Request(
+            f"{host}{path}",
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "GrowCube/4.1",
+            },
+        )
+        try:
+            with urlopen(request, timeout=15) as response:
+                data = json.loads(response.read().decode("utf-8"))
+                return data if isinstance(data, dict) else {}
+        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as err:
+            last_error = err
+    if last_error is not None:
+        raise last_error
+    return {}
+
+
+def plant_from_api(plant: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": optional_int(plant.get("id")) or 0,
+        "name": str_or_empty(plant.get("name")),
+        "display_name": str_or_empty(plant.get("display_name")),
+        "category": str_or_empty(plant.get("category")),
+        "description": str_or_empty(plant.get("description")),
+        "image_url": str_or_empty(plant.get("image")),
+        "moisture_min": clamp_int(plant.get("min_soil_moist"), 0, 100, 30),
+        "moisture_max": clamp_int(plant.get("max_soil_moist"), 0, 100, 60),
+        "temp_min": optional_int(plant.get("min_temp")) or 0,
+        "temp_max": optional_int(plant.get("max_temp")) or 0,
+        "air_humidity_min": optional_int(plant.get("min_env_humid")) or 0,
+        "air_humidity_max": optional_int(plant.get("max_env_humid")) or 0,
+    }
+
+
+def str_or_empty(value: Any) -> str:
+    return value if isinstance(value, str) else ""
+
+
+def dashboard_device_entities(device_id: str) -> dict[str, str]:
+    return {
+        "temperature": entity_id("sensor", device_id, "temperature"),
+        "humidity": entity_id("sensor", device_id, "humidity"),
+        "connection_problem": entity_id("binary_sensor", device_id, "connection_problem"),
+        "water_warning": entity_id("binary_sensor", device_id, "water_warning"),
+        "device_locked": entity_id("binary_sensor", device_id, "device_locked"),
+        "tank_remaining": entity_id("sensor", device_id, "tank_remaining"),
+        "tank_level": entity_id("sensor", device_id, "tank_level"),
+        "tank_days_left": entity_id("sensor", device_id, "tank_days_left"),
+        "tank_capacity": entity_id("number", device_id, "tank_capacity"),
+        "mark_tank_full": entity_id("button", device_id, "mark_tank_full"),
+    }
+
+
+def dashboard_channel_entities(device_id: str, channel: str) -> dict[str, str]:
+    return {
+        "name": entity_id("text", device_id, f"plant_name_{channel}"),
+        "photo_url": entity_id("text", device_id, f"plant_photo_url_{channel}"),
+        "plant_configured": entity_id("binary_sensor", device_id, f"plant_{channel}_configured"),
+        "moisture": entity_id("sensor", device_id, f"moisture_{channel}"),
+        "last_watering": entity_id("sensor", device_id, f"last_watering_{channel}"),
+        "history_count": entity_id("sensor", device_id, f"history_count_{channel}"),
+        "next_watering": entity_id("sensor", device_id, f"next_watering_{channel}"),
+        "mode": entity_id("select", device_id, f"watering_mode_{channel}"),
+        "first_watering_time": entity_id("time", device_id, f"first_watering_time_{channel}"),
+        "duration": entity_id("number", device_id, f"duration_seconds_{channel}"),
+        "interval": entity_id("number", device_id, f"interval_hours_{channel}"),
+        "smart_min_moisture": entity_id("number", device_id, f"smart_min_moisture_{channel}"),
+        "smart_max_moisture": entity_id("number", device_id, f"smart_max_moisture_{channel}"),
+        "smart_daytime_watering": entity_id("switch", device_id, f"smart_daytime_watering_{channel}"),
+        "manual_duration": entity_id("number", device_id, f"manual_duration_seconds_{channel}"),
+        "add_plant": entity_id("button", device_id, f"add_plant_{channel}"),
+        "load_history": entity_id("button", device_id, f"load_history_{channel}"),
+        "save": entity_id("button", device_id, f"save_schedule_{channel}"),
+        "reset": entity_id("button", device_id, f"reset_plant_{channel}"),
+        "water": entity_id("button", device_id, f"water_plant_{channel}"),
+        "stop": entity_id("button", device_id, f"stop_watering_{channel}"),
+        "outlet_blocked": entity_id("binary_sensor", device_id, f"outlet_{channel}_blocked"),
+        "outlet_locked": entity_id("binary_sensor", device_id, f"outlet_{channel}_locked"),
+        "sensor_fault": entity_id("binary_sensor", device_id, f"sensor_{channel}_fault"),
+        "sensor_disconnected": entity_id("binary_sensor", device_id, f"sensor_{channel}_disconnected"),
+        "watering_issue": entity_id("binary_sensor", device_id, f"watering_issue_{channel}"),
+        "watering_locked": entity_id("binary_sensor", device_id, f"watering_locked_{channel}"),
+    }
+
+
+def entity_id(domain: str, device_id: str, key: str) -> str:
+    return f"{domain}.growcube_{device_id}_{key}"
+
+
+def mqtt_device_unique_id(device: dict[str, Any]) -> str:
+    value = str(device.get("host") or device.get("device_id") or device.get("id") or "growcube")
+    return "".join(char.lower() if char.isalnum() else "_" for char in value).strip("_") or "growcube"
+
+
+def validate_channel_key(value: str) -> int:
+    text = str(value).strip().lower()
+    if text in "abcd":
+        return "abcd".index(text)
+    if text.isdigit():
+        return validate_channel(int(text))
+    if text.endswith(("a", "b", "c", "d")):
+        return "abcd".index(text[-1])
+    raise ValueError("channel must be a, b, c, d, or 0-3")
+
+
 def install_lovelace_card() -> None:
     if not CARD_SOURCE_PATH.is_file():
         LOGGER.warning("GrowCube Lovelace card source is missing: %s", CARD_SOURCE_PATH)
         return
+    card_source = rendered_lovelace_card()
     copied = False
     for target_path in CARD_TARGET_PATHS:
         if not target_path.parent.parent.exists():
@@ -647,10 +934,10 @@ def install_lovelace_card() -> None:
             continue
         try:
             target_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(CARD_SOURCE_PATH, target_path)
+            target_path.write_text(card_source, encoding="utf-8")
             LOGGER.info("GrowCube Lovelace card copied to %s", target_path)
             versioned_target_path = target_path.with_name(f"growcube-card-{CARD_VERSION}.js")
-            shutil.copyfile(CARD_SOURCE_PATH, versioned_target_path)
+            versioned_target_path.write_text(card_source, encoding="utf-8")
             LOGGER.info("GrowCube Lovelace card copied to %s", versioned_target_path)
             if CARD_IMAGE_SOURCE_DIR.is_dir():
                 shutil.copytree(
@@ -666,6 +953,59 @@ def install_lovelace_card() -> None:
         LOGGER.warning("GrowCube Lovelace card was not installed; Home Assistant config directory is not mounted")
 
 
+def rendered_lovelace_card() -> str:
+    source = CARD_SOURCE_PATH.read_text(encoding="utf-8")
+    api_url = supervisor_ingress_url()
+    if api_url:
+        LOGGER.info("GrowCube Lovelace card will use ingress API %s", api_url)
+    else:
+        LOGGER.warning("GrowCube ingress URL was not discovered; card will use fallback API paths")
+    return source.replace(CARD_API_URL_PLACEHOLDER, api_url)
+
+
+def supervisor_ingress_url() -> str:
+    token = os.environ.get("SUPERVISOR_TOKEN", "")
+    if not token:
+        return ""
+    request = Request(
+        "http://supervisor/addons/self/info",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, OSError) as err:
+        LOGGER.warning("Could not query Supervisor add-on info: %s", err)
+        return ""
+
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        return ""
+    return normalize_ingress_url(
+        data.get("ingress_url")
+        or data.get("ingress_entry")
+        or data.get("ingress_path")
+        or ""
+    )
+
+
+def normalize_ingress_url(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.startswith("http://") or text.startswith("https://"):
+        parsed = urlparse(text)
+        return parsed.path.rstrip("/")
+    if text.startswith("/"):
+        return text.rstrip("/")
+    if text.startswith("api/hassio_ingress/"):
+        return f"/{text.rstrip('/')}"
+    return f"/api/hassio_ingress/{text.strip('/')}"
+
+
 manager = GrowCubeManager()
 
 
@@ -673,6 +1013,7 @@ def main() -> None:
     install_lovelace_card()
     manager.load()
     manager.start_loop()
+    start_ingress_api_server()
     manager.mqtt_bridge = MqttBridge(mqtt_options(), manager.handle_mqtt_command)
     manager.submit(manager.mqtt_bridge.run_forever(manager.snapshot))
     LOGGER.info("GrowCube add-on bridge started")
