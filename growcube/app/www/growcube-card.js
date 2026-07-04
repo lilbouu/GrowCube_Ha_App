@@ -1,3 +1,5 @@
+const GROWCUBE_CARD_VERSION = "0.2.8-addon-fallback-catalog";
+
 class GrowcubeCard extends HTMLElement {
   constructor() {
     super();
@@ -5263,6 +5265,8 @@ class GrowcubeCard extends HTMLElement {
 if (!customElements.get("growcube-card")) {
   customElements.define("growcube-card", GrowcubeCard);
 }
+
+console.info(`GrowCube card ${GROWCUBE_CARD_VERSION}`);
 
 window.customCards = window.customCards || [];
 window.customCards.push({
