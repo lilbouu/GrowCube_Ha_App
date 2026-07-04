@@ -81,6 +81,38 @@ class HistoryCompleteReport(Report):
     history_kind: str
 
 
+@dataclass(frozen=True, slots=True)
+class TankStateReport(Report):
+    remaining_ml: int
+    capacity_ml: int
+    used_ml: int
+
+
+@dataclass(frozen=True, slots=True)
+class TankForecastReport(Report):
+    flags: int
+    valid_days: int
+    confidence: int
+    smart_daily_x10: int
+    manual_daily_x10: int
+    unknown_daily_x10: int
+    smart_events: int
+    manual_events: int
+    unknown_events: int
+    today_smart_ml: int
+    today_manual_ml: int
+    today_unknown_ml: int
+
+
+@dataclass(frozen=True, slots=True)
+class DelayedTimedWateringStateReport(Report):
+    channel: int
+    enabled: bool
+    duration_seconds: int
+    interval_hours: int
+    next_start_epoch: int
+
+
 ReportCallback = Callable[[Report], Awaitable[None] | None]
 ConnectionCallback = Callable[[], Awaitable[None] | None]
 
@@ -130,6 +162,7 @@ class GrowCubeClient:
         await self.send(Command(44, time_sync_payload(datetime.now())))
         await self.send(Command(52, ""))
         await self.send(Command(54, ""))
+        await self.send(Command(55, ""))
         return True, ""
 
     async def disconnect(self) -> None:
@@ -246,6 +279,47 @@ def report_from_message(command: int, payload: str, raw: str) -> Report:
                     channel=parts[0],
                     success=parts[1] == 1,
                     history_kind="moisture" if command == 35 else "watering",
+                )
+        if command == 53:
+            parts = _split_ints(payload)
+            if len(parts) == 3 and parts[1] > 0:
+                return TankStateReport(
+                    command,
+                    raw,
+                    remaining_ml=max(0, min(parts[0], parts[1])),
+                    capacity_ml=parts[1],
+                    used_ml=max(0, min(parts[2], parts[1])),
+                )
+        if command == 54:
+            parts = _split_ints(payload)
+            if len(parts) == 13 and parts[0] == 1:
+                return TankForecastReport(
+                    command,
+                    raw,
+                    flags=max(0, min(parts[1], 255)),
+                    valid_days=max(0, min(parts[2], 255)),
+                    confidence=max(0, min(parts[3], 255)),
+                    smart_daily_x10=max(0, parts[4]),
+                    manual_daily_x10=max(0, parts[5]),
+                    unknown_daily_x10=max(0, parts[6]),
+                    smart_events=max(0, parts[7]),
+                    manual_events=max(0, parts[8]),
+                    unknown_events=max(0, parts[9]),
+                    today_smart_ml=max(0, min(parts[10], 65535)),
+                    today_manual_ml=max(0, min(parts[11], 65535)),
+                    today_unknown_ml=max(0, min(parts[12], 65535)),
+                )
+        if command == 55:
+            parts = _split_ints(payload)
+            if len(parts) == 5:
+                return DelayedTimedWateringStateReport(
+                    command,
+                    raw,
+                    channel=parts[0],
+                    enabled=parts[1] == 1,
+                    duration_seconds=max(0, parts[2]),
+                    interval_hours=max(0, parts[3]),
+                    next_start_epoch=max(0, parts[4]),
                 )
     except (TypeError, ValueError):
         pass

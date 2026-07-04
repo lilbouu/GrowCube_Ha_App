@@ -21,6 +21,7 @@ from urllib.request import Request, urlopen
 
 from growcube_client import (
     Command,
+    DelayedTimedWateringStateReport,
     DeviceVersionReport,
     GrowCubeClient,
     HistoryCompleteReport,
@@ -28,6 +29,8 @@ from growcube_client import (
     MoistureReport,
     PumpReport,
     Report,
+    TankForecastReport,
+    TankStateReport,
     WaterStateReport,
     WateringRecordReport,
 )
@@ -44,7 +47,7 @@ OPTIONS_PATH = DATA_DIR / "options.json"
 APP_DIR = Path(__file__).parent
 CARD_SOURCE_PATH = APP_DIR / "www" / "growcube-card.js"
 CARD_IMAGE_SOURCE_DIR = APP_DIR / "www" / "images"
-CARD_VERSION = "0.2.15"
+CARD_VERSION = "0.2.16"
 CARD_API_URL_PLACEHOLDER = "__GROWCUBE_ADDON_API_URL__"
 DEFAULT_INGRESS_PORT = 8099
 CLOUD_CATALOG_HOSTS = ("https://api.growcube.cc", "http://api.growcube.cc")
@@ -59,7 +62,7 @@ CHANNEL_NAMES = ("A", "B", "C", "D")
 
 @dataclass(slots=True)
 class ChannelConfig:
-    configured: bool = True
+    configured: bool = False
     plant_name: str = ""
     photo_url: str = ""
     mode: str = "Disabled"
@@ -78,7 +81,8 @@ class ChannelState:
     moisture: int | None = None
     pump_open: bool = False
     last_watering: str | None = None
-    plant_configured: bool = True
+    next_watering: str | None = None
+    plant_configured: bool = False
     outlet_locked: bool = False
     outlet_blocked: bool = False
     sensor_fault: bool = False
@@ -607,6 +611,52 @@ class GrowCubeManager:
                 else:
                     channel.watering_events_complete = report.success
                 channel.history_loading = not (channel.history_complete and channel.watering_events_complete)
+            elif isinstance(report, TankStateReport):
+                state.tank_capacity_ml = clamp_int(report.capacity_ml, 500, 50000, state.tank_capacity_ml)
+                state.tank_remaining_ml = clamp_int(report.remaining_ml, 0, state.tank_capacity_ml, state.tank_remaining_ml)
+                state.tank_used_ml = clamp_int(report.used_ml, 0, state.tank_capacity_ml, state.tank_used_ml)
+                LOGGER.info(
+                    "Tank state device=%s remaining_ml=%s capacity_ml=%s used_ml=%s",
+                    state.host,
+                    state.tank_remaining_ml,
+                    state.tank_capacity_ml,
+                    state.tank_used_ml,
+                )
+            elif isinstance(report, TankForecastReport):
+                LOGGER.info(
+                    "Tank forecast device=%s valid_days=%s confidence=%s smart_daily_ml=%.1f manual_daily_ml=%.1f",
+                    state.host,
+                    report.valid_days,
+                    report.confidence,
+                    report.smart_daily_x10 / 10,
+                    report.manual_daily_x10 / 10,
+                )
+            elif isinstance(report, DelayedTimedWateringStateReport) and 0 <= report.channel < len(state.channels):
+                channel = state.channels[report.channel]
+                if report.enabled and report.duration_seconds > 0 and report.interval_hours > 0:
+                    next_watering = datetime_from_growcube_local_epoch(report.next_start_epoch)
+                    channel.next_watering = next_watering.isoformat() if next_watering is not None else None
+                    channel.config.mode = "Repeating"
+                    channel.plant_configured = True
+                    channel.config.configured = True
+                    channel.config.duration_seconds = report.duration_seconds
+                    channel.config.amount_ml = stable_watering_amount_ml(report.duration_seconds, channel.config.amount_ml)
+                    channel.config.interval_hours = report.interval_hours
+                    if next_watering is not None:
+                        channel.config.first_watering_time = next_watering.strftime("%H:%M:%S")
+                    LOGGER.info(
+                        "Timed watering state device=%s channel=%s enabled duration_s=%s interval_h=%s next=%s",
+                        state.host,
+                        CHANNEL_NAMES[report.channel],
+                        report.duration_seconds,
+                        report.interval_hours,
+                        channel.next_watering,
+                    )
+                else:
+                    channel.next_watering = None
+                    if channel.config.mode == "Repeating":
+                        channel.config.mode = "Disabled"
+                    LOGGER.info("Timed watering state device=%s channel=%s disabled", state.host, CHANNEL_NAMES[report.channel])
 
             self.touch_locked(state)
 
@@ -644,7 +694,8 @@ class GrowCubeManager:
                 channel.moisture = optional_int(raw_channel.get("moisture"))
                 channel.pump_open = bool(raw_channel.get("pump_open", False))
                 channel.last_watering = raw_channel.get("last_watering")
-                channel.plant_configured = bool(raw_channel.get("plant_configured", True))
+                channel.next_watering = raw_channel.get("next_watering")
+                channel.plant_configured = bool(raw_channel.get("plant_configured", False))
                 channel.outlet_locked = bool(raw_channel.get("outlet_locked", False))
                 channel.outlet_blocked = bool(raw_channel.get("outlet_blocked", False))
                 channel.sensor_fault = bool(raw_channel.get("sensor_fault", False))
@@ -669,6 +720,11 @@ class GrowCubeManager:
                         smart_max_moisture=clamp_int(config.get("smart_max_moisture"), 2, 99, 60),
                         smart_daytime_watering=bool(config.get("smart_daytime_watering", True)),
                     )
+                if not isinstance(config, dict):
+                    channel.config.configured = channel.plant_configured
+                if is_empty_placeholder_channel(channel):
+                    channel.plant_configured = False
+                    channel.config.configured = False
             channels.append(channel)
         while len(channels) < 4:
             channels.append(ChannelState())
@@ -718,7 +774,7 @@ class GrowCubeManager:
                     "moisture": channel.moisture,
                     "pump_open": channel.pump_open,
                     "last_watering": channel.last_watering,
-                    "next_watering": None,
+                    "next_watering": channel.next_watering,
                     "plant_configured": channel.plant_configured and channel.config.configured,
                     "outlet_locked": channel.outlet_locked,
                     "outlet_blocked": channel.outlet_blocked,
@@ -814,6 +870,48 @@ def watering_duration_seconds(amount_ml: int) -> int:
     return max(4, min(60, seconds))
 
 
+def watering_amount_ml(duration_seconds: int) -> int:
+    seconds = max(0, int(duration_seconds))
+    if seconds == 0:
+        return 0
+    if seconds <= 1:
+        return 15
+    if seconds <= 3:
+        return 15 + ((seconds - 1) * (26 - 15) + (3 - 1) // 2) // (3 - 1)
+    if seconds <= 4:
+        return 26 + ((seconds - 3) * (37 - 26) + (4 - 3) // 2) // (4 - 3)
+    if seconds <= 6:
+        return 37 + ((seconds - 4) * (59 - 37) + (6 - 4) // 2) // (6 - 4)
+    if seconds <= 10:
+        return 59 + ((seconds - 6) * (97 - 59) + (10 - 6) // 2) // (10 - 6)
+    return 97 + ((seconds - 10) * (97 - 59) + (10 - 6) // 2) // (10 - 6)
+
+
+def stable_watering_amount_ml(duration_seconds: int, preferred_amount_ml: int | None = None) -> int:
+    if preferred_amount_ml is not None:
+        preferred = max(10, min(500, int(preferred_amount_ml)))
+        if watering_duration_seconds(preferred) == duration_seconds:
+            return preferred
+    amount = max(10, min(500, watering_amount_ml(duration_seconds)))
+    return ((amount + 5) // 10) * 10
+
+
+def datetime_from_growcube_local_epoch(epoch: int) -> datetime | None:
+    try:
+        utc_components = datetime.fromtimestamp(int(epoch), timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return datetime(
+        utc_components.year,
+        utc_components.month,
+        utc_components.day,
+        utc_components.hour,
+        utc_components.minute,
+        utc_components.second,
+        tzinfo=datetime.now().astimezone().tzinfo,
+    )
+
+
 def next_watering_datetime(value: str) -> datetime:
     normalized = normalize_time(value, "08:00:00")
     hour, minute, second = (int(part) for part in normalized.split(":"))
@@ -822,6 +920,19 @@ def next_watering_datetime(value: str) -> datetime:
     if start <= now:
         start = start + timedelta(days=1)
     return start
+
+
+def is_empty_placeholder_channel(channel: ChannelState) -> bool:
+    config = channel.config
+    return (
+        not config.plant_name.strip()
+        and not config.photo_url.strip()
+        and config.mode == "Disabled"
+        and not channel.last_watering
+        and not channel.next_watering
+        and not channel.history
+        and not channel.watering_events
+    )
 
 
 def mqtt_safe_id(value: str) -> str:
