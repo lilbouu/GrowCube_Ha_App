@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.19-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.20-addon-compat";
 const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
@@ -230,9 +230,44 @@ class GrowcubeCard extends HTMLElement {
       console.info("[GrowCube] using configured add-on API URL", { url: this._addonApiUrlCache });
       return this._addonApiUrlCache;
     }
-    this._addonApiUrlCache = await this._discoverAddonApiUrl();
-    console.info("[GrowCube] discovered add-on API URL", { url: this._addonApiUrlCache });
-    return this._addonApiUrlCache;
+    const entityUrl = this._addonApiUrlFromState();
+    if (entityUrl) {
+      this._addonApiUrlCache = entityUrl;
+      console.info("[GrowCube] using add-on API URL from entity state", { url: this._addonApiUrlCache });
+      return this._addonApiUrlCache;
+    }
+    const discoveredUrl = await this._discoverAddonApiUrl();
+    if (discoveredUrl) {
+      this._addonApiUrlCache = discoveredUrl;
+    }
+    console.info("[GrowCube] discovered add-on API URL", { url: discoveredUrl });
+    return discoveredUrl;
+  }
+
+  _addonApiUrlFromState() {
+    const records = this._deviceRecords();
+    for (const record of records) {
+      const url = this._normalizeAddonApiUrl(record?.addon_api_url || "");
+      if (url) {
+        return url;
+      }
+    }
+    for (const channel of this._channels()) {
+      const state = this._state(this._entities(channel).history_count);
+      const url = this._normalizeAddonApiUrl(state?.attributes?.addon_api_url || "");
+      if (url) {
+        return url;
+      }
+    }
+    if (this._hass?.states) {
+      for (const state of Object.values(this._hass.states)) {
+        const url = this._normalizeAddonApiUrl(state?.attributes?.addon_api_url || "");
+        if (url) {
+          return url;
+        }
+      }
+    }
+    return "";
   }
 
   async _discoverAddonApiUrl() {

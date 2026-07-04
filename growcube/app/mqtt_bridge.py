@@ -207,6 +207,7 @@ class MqttBridge:
                     f"\"history_complete\":{{{{ {channel_base}.history_complete | tojson }}}},"
                     f"\"watering_events_complete\":{{{{ {channel_base}.watering_events_complete | tojson }}}},"
                     f"\"history_points\":{{{{ {channel_base}.history_count }}}},"
+                    "\"addon_api_url\":{{ value_json.addon_api_url | tojson }},"
                     f"\"history\":{{{{ {channel_base}.history | tojson }}}},"
                     f"\"watering_events\":{{{{ {channel_base}.watering_events | tojson }}}}"
                     "}"

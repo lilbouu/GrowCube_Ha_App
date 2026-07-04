@@ -47,11 +47,12 @@ OPTIONS_PATH = DATA_DIR / "options.json"
 APP_DIR = Path(__file__).parent
 CARD_SOURCE_PATH = APP_DIR / "www" / "growcube-card.js"
 CARD_IMAGE_SOURCE_DIR = APP_DIR / "www" / "images"
-CARD_VERSION = "0.2.19"
+CARD_VERSION = "0.2.20"
 CARD_API_URL_PLACEHOLDER = "__GROWCUBE_ADDON_API_URL__"
 DEFAULT_INGRESS_PORT = 8099
 CLOUD_CATALOG_HOSTS = ("https://api.growcube.cc", "http://api.growcube.cc")
 CLOUD_CATALOG_LIMIT = 40
+_SUPERVISOR_INGRESS_URL_CACHE: str | None = None
 CARD_TARGET_PATHS = (
     Path("/homeassistant/www/growcube/growcube-card.js"),
     Path("/homeassistant_config/www/growcube/growcube-card.js"),
@@ -296,6 +297,7 @@ class GrowCubeManager:
             "host": state.host,
             "name": state.name or f"GrowCube {state.host}",
             "connected": state.connected,
+            "addon_api_url": device.get("addon_api_url") or "",
             "entities": dashboard_device_entities(device_id),
             "channels": {
                 channel: dashboard_channel_entities(device_id, channel)
@@ -888,6 +890,7 @@ class GrowCubeManager:
             "error": state.error,
             "device_id": state.device_id,
             "version": state.version,
+            "addon_api_url": cached_supervisor_ingress_url(),
             "temperature": state.temperature,
             "humidity": state.humidity,
             "water_warning": state.water_warning,
@@ -1356,12 +1359,19 @@ def install_lovelace_card() -> None:
 
 def rendered_lovelace_card() -> str:
     source = CARD_SOURCE_PATH.read_text(encoding="utf-8")
-    api_url = supervisor_ingress_url()
+    api_url = cached_supervisor_ingress_url()
     if api_url:
         LOGGER.info("GrowCube Lovelace card will use ingress API %s", api_url)
     else:
         LOGGER.warning("GrowCube ingress URL was not discovered; card will use fallback API paths")
     return source.replace(CARD_API_URL_PLACEHOLDER, api_url)
+
+
+def cached_supervisor_ingress_url() -> str:
+    global _SUPERVISOR_INGRESS_URL_CACHE
+    if _SUPERVISOR_INGRESS_URL_CACHE is None:
+        _SUPERVISOR_INGRESS_URL_CACHE = supervisor_ingress_url()
+    return _SUPERVISOR_INGRESS_URL_CACHE
 
 
 def supervisor_ingress_url() -> str:
