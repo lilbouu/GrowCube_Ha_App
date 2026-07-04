@@ -37,7 +37,7 @@ OPTIONS_PATH = DATA_DIR / "options.json"
 APP_DIR = Path(__file__).parent
 CARD_SOURCE_PATH = APP_DIR / "www" / "growcube-card.js"
 CARD_IMAGE_SOURCE_DIR = APP_DIR / "www" / "images"
-CARD_VERSION = "0.2.9"
+CARD_VERSION = "0.2.10"
 CARD_TARGET_PATHS = (
     Path("/homeassistant/www/growcube/growcube-card.js"),
     Path("/homeassistant_config/www/growcube/growcube-card.js"),

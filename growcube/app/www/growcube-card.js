@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.9-addon-fallback-catalog";
+const GROWCUBE_CARD_VERSION = "0.2.10-addon-compat";
 
 class GrowcubeCard extends HTMLElement {
   constructor() {
@@ -1112,7 +1112,9 @@ class GrowcubeCard extends HTMLElement {
         if (entities.smart_max_moisture) {
           await this._setNumber(entities.smart_max_moisture, this._plantWizardSmartMax);
         }
-        await this._setSwitch(entities.smart_daytime_watering, this._plantWizardDaytime);
+        if (entities.smart_daytime_watering) {
+          await this._setSwitch(entities.smart_daytime_watering, this._plantWizardDaytime);
+        }
       } else if (this._plantWizardMode === "Repeating") {
         if (entities.first_watering_time) {
           await this._setTime(entities.first_watering_time, this._plantWizardStartTime());
@@ -1124,12 +1126,13 @@ class GrowcubeCard extends HTMLElement {
           await this._setNumber(entities.interval, this._plantWizardIntervalDays * 24);
         }
       }
-      await this._press(entities.add_plant);
+      if (entities.add_plant) {
+        await this._press(entities.add_plant);
+      }
       if (this._plantWizardMode === "Smart" || this._plantWizardMode === "Repeating") {
-        if (!entities.save) {
-          throw new Error("Save watering entity is unavailable");
+        if (entities.save) {
+          await this._press(entities.save);
         }
-        await this._press(entities.save);
       }
       this._plantWizardOpen = false;
       this._showToast("Plant added");
@@ -1154,10 +1157,10 @@ class GrowcubeCard extends HTMLElement {
       this._plantWizardResultPage = 0;
       this._plantWizardError = this._plantWizardResults.length ? "" : "No plants found";
     } catch (error) {
-      this._plantWizardResults = this._fallbackPlantCatalogSearch(this._plantWizardSearch.trim(), true);
+      this._plantWizardResults = this._customPlantCatalogResult(this._plantWizardSearch.trim());
       this._plantWizardResultPage = 0;
       this._plantWizardError = this._plantWizardResults.length
-        ? "Online catalog unavailable; using local profile"
+        ? "Online catalog unavailable; using custom profile"
         : "Catalog unavailable";
     } finally {
       this._plantWizardLoading = false;
@@ -1190,7 +1193,7 @@ class GrowcubeCard extends HTMLElement {
       // Browser CORS or internet access can block the cloud catalog; use local data.
     }
 
-    return this._fallbackPlantCatalogSearch(query, true);
+    return this._customPlantCatalogResult(query);
   }
 
   async _fetchGrowCubeCatalog(query) {
@@ -1224,29 +1227,15 @@ class GrowcubeCard extends HTMLElement {
     };
   }
 
-  _fallbackPlantCatalogSearch(query, includeCustom = false) {
-    const normalizedQuery = this._normalizeProfileText(query).toLowerCase();
-    const words = normalizedQuery.split(/\s+/).filter(Boolean);
-    const localMatches = this._fallbackPlantCatalog()
-      .filter((plant) => {
-        const haystack = [
-          plant.name,
-          plant.display_name,
-          plant.category,
-          ...(plant.aliases || []),
-        ].join(" ").toLowerCase();
-        return words.every((word) => haystack.includes(word));
-      })
-      .slice(0, 12);
-
-    if (!includeCustom || localMatches.length || normalizedQuery.length < 2) {
-      return localMatches;
+  _customPlantCatalogResult(query) {
+    const displayName = this._normalizeProfileText(query);
+    if (displayName.length < 2) {
+      return [];
     }
-
     return [{
       id: 0,
-      name: normalizedQuery,
-      display_name: query.trim(),
+      name: displayName.toLowerCase(),
+      display_name: displayName,
       category: "Custom plant",
       description: "Local custom profile created from the search text.",
       image_url: "",
@@ -1257,21 +1246,6 @@ class GrowcubeCard extends HTMLElement {
       air_humidity_min: 0,
       air_humidity_max: 0,
     }];
-  }
-
-  _fallbackPlantCatalog() {
-    return [
-      { name: "basil", display_name: "Basil", category: "Herb", aliases: ["ocimum basilicum"], moisture_min: 35, moisture_max: 65, temp_min: 18, temp_max: 30, air_humidity_min: 40, air_humidity_max: 70 },
-      { name: "mint", display_name: "Mint", category: "Herb", aliases: ["mentha"], moisture_min: 45, moisture_max: 75, temp_min: 15, temp_max: 28, air_humidity_min: 45, air_humidity_max: 75 },
-      { name: "parsley", display_name: "Parsley", category: "Herb", aliases: ["petroselinum crispum"], moisture_min: 35, moisture_max: 65, temp_min: 12, temp_max: 26, air_humidity_min: 40, air_humidity_max: 70 },
-      { name: "tomato", display_name: "Tomato", category: "Vegetable", aliases: ["solanum lycopersicum"], moisture_min: 40, moisture_max: 70, temp_min: 18, temp_max: 30, air_humidity_min: 40, air_humidity_max: 70 },
-      { name: "monstera", display_name: "Monstera deliciosa", category: "Houseplant", aliases: ["monstera"], moisture_min: 25, moisture_max: 55, temp_min: 18, temp_max: 30, air_humidity_min: 50, air_humidity_max: 80 },
-      { name: "pothos", display_name: "Pothos", category: "Houseplant", aliases: ["epipremnum aureum", "devil's ivy"], moisture_min: 20, moisture_max: 55, temp_min: 18, temp_max: 30, air_humidity_min: 40, air_humidity_max: 80 },
-      { name: "snake plant", display_name: "Snake plant", category: "Houseplant", aliases: ["sansevieria", "dracaena trifasciata"], moisture_min: 10, moisture_max: 35, temp_min: 15, temp_max: 30, air_humidity_min: 30, air_humidity_max: 60 },
-      { name: "peace lily", display_name: "Peace lily", category: "Houseplant", aliases: ["spathiphyllum"], moisture_min: 35, moisture_max: 65, temp_min: 18, temp_max: 30, air_humidity_min: 45, air_humidity_max: 80 },
-      { name: "hibiscus", display_name: "Hibiscus rosa-sinensis", category: "Flowering plant", aliases: ["hibiscus rosa sinensis"], moisture_min: 30, moisture_max: 65, temp_min: 16, temp_max: 32, air_humidity_min: 40, air_humidity_max: 75 },
-      { name: "pelargonium", display_name: "Pelargonium", category: "Flowering plant", aliases: ["geranium"], moisture_min: 20, moisture_max: 50, temp_min: 12, temp_max: 28, air_humidity_min: 35, air_humidity_max: 65 },
-    ];
   }
 
   _selectPlantCatalogItem(index) {
@@ -4261,9 +4235,7 @@ class GrowcubeCard extends HTMLElement {
   }
 
   _plantWizardChannelStep() {
-    const availableChannels = this._channels().filter((channel) => (
-      channel === this._plantWizardChannel || !this._isPlantConfigured(this._entities(channel), false)
-    ));
+    const availableChannels = this._channels();
     return `
       <div class="channel-grid">
         ${availableChannels.map((channel) => `
