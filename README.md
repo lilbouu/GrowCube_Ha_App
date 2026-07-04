@@ -137,6 +137,7 @@ Then create or edit a dashboard and add a manual card:
 ```yaml
 type: custom:growcube-card
 title: GrowCube
+overview: dashboard
 ```
 
 You can also import the portable dashboard YAML from:

@@ -36,6 +36,7 @@ STATE_PATH = DATA_DIR / "growcube_state.json"
 OPTIONS_PATH = DATA_DIR / "options.json"
 APP_DIR = Path(__file__).parent
 CARD_SOURCE_PATH = APP_DIR / "www" / "growcube-card.js"
+CARD_IMAGE_SOURCE_DIR = APP_DIR / "www" / "images"
 CARD_TARGET_PATHS = (
     Path("/homeassistant/www/growcube/growcube-card.js"),
     Path("/homeassistant_config/www/growcube/growcube-card.js"),
@@ -647,6 +648,13 @@ def install_lovelace_card() -> None:
             target_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(CARD_SOURCE_PATH, target_path)
             LOGGER.info("GrowCube Lovelace card copied to %s", target_path)
+            if CARD_IMAGE_SOURCE_DIR.is_dir():
+                shutil.copytree(
+                    CARD_IMAGE_SOURCE_DIR,
+                    target_path.parent / "images",
+                    dirs_exist_ok=True,
+                )
+                LOGGER.info("GrowCube Lovelace card images copied to %s", target_path.parent / "images")
             copied = True
         except OSError as err:
             LOGGER.warning("Could not copy GrowCube Lovelace card to %s: %s", target_path, err)

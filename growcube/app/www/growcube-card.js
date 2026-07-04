@@ -4,171 +4,1227 @@ class GrowcubeCard extends HTMLElement {
     this.attachShadow({ mode: "open" });
     this._config = {};
     this._hass = null;
+    this._wateringOpen = false;
+    this._wateringSeconds = 25;
+    this._reservoirOpen = false;
+    this._reservoirAmount = 1500;
+    this._reservoirTargetEntity = "";
+    this._reservoirGuideOpen = false;
+    this._reservoirGuideStep = 0;
+    this._reservoirGuideDontShow = false;
+    this._pendingReservoirEntity = "";
+    this._pendingReservoirAmount = undefined;
+    this._editDialog = null;
+    this._detailMenuOpen = false;
+    this._aboutDialogOpen = false;
+    this._deletePlantDialogOpen = false;
+    this._aboutProfileCache = {};
+    this._aboutProfileLoading = false;
+    this._plantWizardOpen = false;
+    this._plantWizardStep = 0;
+    this._plantWizardName = "";
+    this._plantWizardPhotoUrl = "";
+    this._plantWizardChannel = "a";
+    this._plantWizardMode = "Smart";
+    this._plantWizardAmount = 50;
+    this._plantWizardIntervalDays = 1;
+    this._plantWizardStartHour = 8;
+    this._plantWizardStartMinute = 0;
+    this._plantWizardSmartMin = 20;
+    this._plantWizardSmartMax = 60;
+    this._plantWizardDaytime = true;
+    this._plantWizardSearch = "";
+    this._plantWizardResults = [];
+    this._plantWizardResultPage = 0;
+    this._plantWizardSelected = null;
+    this._plantWizardCustom = false;
+    this._plantWizardLoading = false;
+    this._plantWizardError = "";
+    this._history = [];
+    this._historyEntity = "";
+    this._historyLoading = false;
+    this._historyError = "";
+    this._historyLoadedAt = 0;
+    this._historyWindowHours = 168;
+    this._cubeHistoryRequestedAt = {};
+    this._cubeHistory = {};
+    this._cubeHistoryLoading = {};
+    this._cubeHistoryLoadedAt = {};
+    this._cubeHistoryPollTimer = null;
+    this._dashboardDevices = [];
+    this._dashboardDevicesLoadedAt = 0;
+    this._dashboardDevicesLoading = false;
+    this._deviceMenuOpen = false;
+    this._toast = "";
+    this._toastTimer = null;
+    this._dismissedProblems = this._loadDismissedProblems();
+    this._modeWizardOpen = false;
+    this._modeWizardStep = 0;
+    this._modeWizardMode = "Smart";
+    this._modeWizardAmount = 50;
+    this._modeWizardIntervalDays = 1;
+    this._modeWizardStartHour = 8;
+    this._modeWizardStartMinute = 0;
+    this._modeWizardSmartMin = 20;
+    this._modeWizardSmartMax = 60;
+    this._modeWizardDaytime = true;
   }
 
   setConfig(config) {
+    if (!config.entities && !config.channel && !config.overview && !config.graph) {
+      throw new Error("GrowCube card requires channel, overview, graph, or entities");
+    }
     this._config = {
-      title: "GrowCube",
-      overview: "",
-      detail: false,
-      channel: "",
-      device: "",
-      entity_prefix: "",
-      entities: {},
       ...config,
+      entities: config.entities || {},
     };
+    this._historyWindowHours = this._clamp(Number(config.hours_to_show) || this._historyWindowHours || 168, 1, 168);
     this._render();
   }
 
   set hass(hass) {
     this._hass = hass;
+    if (this._plantWizardOpen || this._editDialog || this._modeWizardOpen) {
+      return;
+    }
     this._render();
   }
 
   getCardSize() {
-    return this._config.detail ? 8 : 6;
+    if (this._config.graph) {
+      return 4;
+    }
+    return this._config.detail ? 8 : 3;
   }
 
   _state(entityId) {
     return entityId && this._hass ? this._hass.states[entityId] : undefined;
   }
 
-  _domainEntity(domain, suffixes) {
-    const configured = this._config.entities || {};
-    for (const suffix of Array.isArray(suffixes) ? suffixes : [suffixes]) {
-      const key = String(suffix).replace(/^_/, "");
-      if (configured[key]) {
-        return configured[key];
-      }
-    }
-    if (!this._hass) {
-      return "";
-    }
-    const wanted = (Array.isArray(suffixes) ? suffixes : [suffixes]).flatMap((suffix) => {
-      const text = String(suffix);
-      return text.startsWith("_") ? [text, text.slice(1)] : [text, `_${text}`];
-    });
-    const prefix = this._config.entity_prefix || this._config.device_prefix || "";
-    return Object.keys(this._hass.states).sort().find((entityId) => {
-      if (!entityId.startsWith(`${domain}.`)) {
-        return false;
-      }
-      const objectId = entityId.slice(domain.length + 1);
-      if (prefix && !objectId.startsWith(prefix)) {
-        return false;
-      }
-      if (this._config.device && !objectId.includes(this._sanitize(this._config.device))) {
-        return false;
-      }
-      return wanted.some((suffix) => objectId.endsWith(suffix));
-    }) || "";
+  _selectedDeviceId() {
+    const queryDevice = new URLSearchParams(window.location?.search || "").get("device");
+    const configured = this._config.device_id || this._config.device_prefix || this._config.entity_prefix || this._config.device || "";
+    return String(queryDevice || configured || this._deviceIdHint()).trim();
   }
 
-  _entities(channel = this._channelKey()) {
-    const c = channel;
+  _deviceRecord(deviceId = this._selectedDeviceId()) {
+    if (!deviceId) {
+      return this._dashboardDevices[0];
+    }
+    return this._dashboardDevices.find((item) => item.device_id === deviceId) || this._dashboardDevices[0];
+  }
+
+  _deviceRecords() {
+    return this._dashboardDevices.length ? this._dashboardDevices : [this._fallbackDeviceRecord()].filter(Boolean);
+  }
+
+  _setSelectedDevice(deviceId) {
+    const value = String(deviceId || "").trim();
+    if (!value) {
+      return;
+    }
+    const url = new URL(window.location.href);
+    url.searchParams.set("device", value);
+    window.history.pushState(null, "", `${url.pathname}${url.search}${url.hash}`);
+    this._historyEntity = "";
+    this._historyLoadedAt = 0;
+    this._cubeHistory = {};
+    this._cubeHistoryLoadedAt = {};
+    this._cubeHistoryRequestedAt = {};
+    this._deviceMenuOpen = false;
+    this._render();
+    window.dispatchEvent(new CustomEvent("location-changed"));
+  }
+
+  _fallbackDeviceRecord() {
+    const deviceId = this._deviceIdHint();
+    if (!deviceId) {
+      return undefined;
+    }
     return {
-      temperature: this._domainEntity("sensor", "_temperature"),
-      humidity: this._domainEntity("sensor", "_humidity"),
-      tank_remaining: this._domainEntity("sensor", "_tank_remaining"),
-      tank_level: this._domainEntity("sensor", "_tank_level"),
-      tank_days_left: this._domainEntity("sensor", "_tank_days_left"),
-      connection_problem: this._domainEntity("binary_sensor", "_connection_problem"),
-      water_warning: this._domainEntity("binary_sensor", "_water_warning"),
-      device_locked: this._domainEntity("binary_sensor", "_device_locked"),
-      name: this._domainEntity("text", `_plant_name_${c}`),
-      photo_url: this._domainEntity("text", `_plant_photo_url_${c}`),
-      plant_configured: this._domainEntity("binary_sensor", `_plant_${c}_configured`),
-      moisture: this._domainEntity("sensor", `_moisture_${c}`),
-      mode: this._domainEntity("select", `_watering_mode_${c}`),
-      next_watering: this._domainEntity("sensor", `_next_watering_${c}`),
-      last_watering: this._domainEntity("sensor", `_last_watering_${c}`),
-      history_count: this._domainEntity("sensor", `_history_count_${c}`),
-      pump: this._domainEntity("binary_sensor", [`_pump_${c}_open`, `_pump_${c}`]),
-      outlet_blocked: this._domainEntity("binary_sensor", `_outlet_${c}_blocked`),
-      outlet_locked: this._domainEntity("binary_sensor", `_outlet_${c}_locked`),
-      sensor_fault: this._domainEntity("binary_sensor", `_sensor_${c}_fault`),
-      sensor_disconnected: this._domainEntity("binary_sensor", `_sensor_${c}_disconnected`),
-      watering_issue: this._domainEntity("binary_sensor", `_watering_issue_${c}`),
-      watering_locked: this._domainEntity("binary_sensor", `_watering_locked_${c}`),
-      manual_duration: this._domainEntity("number", `_manual_duration_seconds_${c}`),
-      duration: this._domainEntity("number", `_duration_seconds_${c}`),
-      interval: this._domainEntity("number", `_interval_hours_${c}`),
-      smart_min_moisture: this._domainEntity("number", `_smart_min_moisture_${c}`),
-      smart_max_moisture: this._domainEntity("number", `_smart_max_moisture_${c}`),
-      smart_daytime_watering: this._domainEntity("switch", `_smart_daytime_watering_${c}`),
-      first_watering_time: this._domainEntity("time", `_first_watering_time_${c}`),
-      water: this._domainEntity("button", `_water_plant_${c}`),
-      stop: this._domainEntity("button", `_stop_watering_${c}`),
-      load_history: this._domainEntity("button", `_load_history_${c}`),
-      add_plant: this._domainEntity("button", `_add_plant_${c}`),
-      reset: this._domainEntity("button", `_reset_plant_${c}`),
-      save_schedule: this._domainEntity("button", `_save_schedule_${c}`),
+      device_id: deviceId,
+      name: deviceId.replace(/^growcube_/, "GrowCube "),
+      entities: {},
+      channels: {},
     };
   }
 
-  _channelKey() {
-    const value = String(this._config.channel || this._config.channel_id || "").toLowerCase();
+  async _loadDashboardDevicesIfNeeded(force = false) {
+    if (!this._hass?.callApi) {
+      return;
+    }
+    const cacheMs = 30 * 1000;
+    if (!force && this._dashboardDevicesLoadedAt && Date.now() - this._dashboardDevicesLoadedAt < cacheMs) {
+      return;
+    }
+    if (this._dashboardDevicesLoading) {
+      return;
+    }
+    this._dashboardDevicesLoading = true;
+    try {
+      const result = await this._hass.callApi("GET", "growcube/dashboard");
+      this._dashboardDevices = Array.isArray(result?.devices) ? result.devices : [];
+      this._dashboardDevicesLoadedAt = Date.now();
+    } catch (error) {
+      this._dashboardDevicesLoadedAt = Date.now();
+    } finally {
+      this._dashboardDevicesLoading = false;
+      this._render();
+    }
+  }
+
+  _channelKey(channelValue = undefined) {
+    const explicit = channelValue ?? this._config.channel ?? this._config.channel_id;
     const pathMatch = window.location?.pathname?.toLowerCase().match(/growcube-plant-([abcd])(?:\/|$)/);
-    const match = value.match(/[abcd]$/) || pathMatch;
-    return match ? match[1] || match[0] : "a";
+    const channel = String(explicit ?? pathMatch?.[1] ?? "A").trim().toLowerCase();
+    if (/^[0-3]$/.test(channel)) {
+      return "abcd"[Number(channel)];
+    }
+    const numericMatch = channel.match(/(?:channel|plant)?\s*([0-3])$/);
+    if (numericMatch) {
+      return "abcd"[Number(numericMatch[1])];
+    }
+    const match = channel.match(/[abcd]$/);
+    return match ? match[0] : "a";
+  }
+
+  _channelLabel() {
+    return this._channelKey().toUpperCase();
+  }
+
+  _entityBySuffix(domain, suffixes) {
+    if (!this._hass) {
+      return undefined;
+    }
+    const wanted = (Array.isArray(suffixes) ? suffixes : [suffixes]).flatMap((suffix) => {
+      const text = String(suffix);
+      return text.startsWith("_") ? [text, text.slice(1)] : [text];
+    });
+    const prefix = this._config.entity_prefix || this._config.device_prefix || this._config.device || "";
+    return Object.keys(this._hass.states)
+      .sort()
+      .find((entityId) => {
+        if (!entityId.startsWith(`${domain}.`)) {
+          return false;
+        }
+        const objectId = entityId.slice(domain.length + 1);
+        if (prefix && !objectId.startsWith(prefix) && !objectId.startsWith(`growcube_${prefix}`)) {
+          return false;
+        }
+        return wanted.some((suffix) => objectId.endsWith(suffix));
+      });
+  }
+
+  _entityBySuffixFiltered(domain, suffixes, { includes = [], excludes = [] } = {}) {
+    if (!this._hass) {
+      return undefined;
+    }
+    const wanted = (Array.isArray(suffixes) ? suffixes : [suffixes]).flatMap((suffix) => {
+      const text = String(suffix);
+      return text.startsWith("_") ? [text, text.slice(1)] : [text];
+    });
+    const includeList = (Array.isArray(includes) ? includes : [includes]).filter(Boolean).map(String);
+    const excludeList = (Array.isArray(excludes) ? excludes : [excludes]).filter(Boolean).map(String);
+    const prefix = this._config.entity_prefix || this._config.device_prefix || this._config.device || "";
+    return Object.keys(this._hass.states)
+      .sort()
+      .find((entityId) => {
+        if (!entityId.startsWith(`${domain}.`)) {
+          return false;
+        }
+        const objectId = entityId.slice(domain.length + 1);
+        if (prefix && !objectId.startsWith(prefix) && !objectId.startsWith(`growcube_${prefix}`)) {
+          return false;
+        }
+        if (!wanted.some((suffix) => objectId.endsWith(suffix))) {
+          return false;
+        }
+        if (includeList.length && !includeList.some((text) => objectId.includes(text))) {
+          return false;
+        }
+        if (excludeList.some((text) => objectId.includes(text))) {
+          return false;
+        }
+        return true;
+      });
+  }
+
+  _entityFromPeer(domain, peerEntityId, fromSuffixes, toSuffix) {
+    if (!peerEntityId || !this._hass) {
+      return undefined;
+    }
+    const [peerDomain, objectId] = peerEntityId.split(".", 2);
+    if (!peerDomain || !objectId) {
+      return undefined;
+    }
+    for (const fromSuffix of fromSuffixes) {
+      if (objectId.endsWith(fromSuffix)) {
+        const candidate = `${domain}.${objectId.slice(0, -fromSuffix.length)}${toSuffix}`;
+        if (this._hass.states[candidate]) {
+          return candidate;
+        }
+      }
+    }
+    return undefined;
+  }
+
+  _entities(channelValue = undefined) {
+    const channel = this._channelKey(channelValue);
+    const explicit = this._config.entities || {};
+    const selectedDevice = this._deviceRecord();
+    const mappedChannelEntities = selectedDevice?.channels?.[channel] || {};
+    const mappedDeviceEntities = selectedDevice?.entities || {};
+    const moisture = explicit.moisture || this._entityBySuffix("sensor", `_moisture_${channel}`);
+    const loadHistory = explicit.load_history || this._entityBySuffix("button", `_load_history_${channel}`);
+    const historyCount = explicit.history_count
+      || this._entityBySuffix("sensor", [
+        `_history_count_${channel}`,
+        `_history_${channel}`,
+        `_moisture_history_${channel}`,
+      ])
+      || this._entityFromPeer("sensor", loadHistory, [`_load_history_${channel}`], `_history_count_${channel}`)
+      || this._entityFromPeer("sensor", moisture, [`_moisture_${channel}`], `_history_count_${channel}`);
+    const entities = {
+      name: mappedChannelEntities.name || this._entityBySuffix("text", `_plant_name_${channel}`),
+      photo_url: mappedChannelEntities.photo_url || this._entityBySuffix("text", `_plant_photo_url_${channel}`),
+      plant_configured: mappedChannelEntities.plant_configured || this._entityBySuffix("binary_sensor", [
+        `_plant_${channel}_configured`,
+        `_plant_configured_${channel}`,
+      ]),
+      moisture: mappedChannelEntities.moisture || moisture,
+      next_watering: mappedChannelEntities.next_watering || this._entityBySuffix("sensor", `_next_watering_${channel}`),
+      mode: mappedChannelEntities.mode || this._entityBySuffix("select", `_watering_mode_${channel}`),
+      first_watering_time: mappedChannelEntities.first_watering_time || this._entityBySuffix("time", `_first_watering_time_${channel}`),
+      duration: mappedChannelEntities.duration || this._entityBySuffixFiltered(
+        "number",
+        [`_watering_amount_${channel}`, `_duration_seconds_${channel}`],
+        { excludes: ["_manual_"] },
+      ),
+      interval: mappedChannelEntities.interval || this._entityBySuffix("number", [`_watering_interval_${channel}`, `_interval_hours_${channel}`]),
+      smart_min_moisture: mappedChannelEntities.smart_min_moisture || this._entityBySuffix("number", [
+        `_smart_min_moisture_${channel}`,
+        `_minimum_moisture_${channel}`,
+      ]),
+      smart_max_moisture: mappedChannelEntities.smart_max_moisture || this._entityBySuffix("number", [
+        `_smart_max_moisture_${channel}`,
+        `_maximum_moisture_${channel}`,
+      ]),
+      smart_daytime_watering: mappedChannelEntities.smart_daytime_watering || this._entityBySuffix("switch", [
+        `_smart_daytime_watering_${channel}`,
+        `_daytime_watering_${channel}`,
+      ]),
+      history_count: mappedChannelEntities.history_count || historyCount,
+      manual_duration: mappedChannelEntities.manual_duration || this._entityBySuffixFiltered(
+        "number",
+        [`_manual_watering_amount_${channel}`, `_manual_duration_seconds_${channel}`],
+        { includes: ["_manual_"] },
+      ),
+      add_plant: mappedChannelEntities.add_plant || this._entityBySuffix("button", `_add_plant_${channel}`),
+      load_history: mappedChannelEntities.load_history || loadHistory,
+      save: mappedChannelEntities.save || this._entityBySuffix("button", `_save_schedule_${channel}`),
+      reset: mappedChannelEntities.reset || this._entityBySuffix("button", `_reset_plant_${channel}`),
+      water: mappedChannelEntities.water || this._entityBySuffix("button", `_water_plant_${channel}`),
+      stop: mappedChannelEntities.stop || this._entityBySuffix("button", `_stop_watering_${channel}`),
+      connection_problem: mappedDeviceEntities.connection_problem || this._entityBySuffix("binary_sensor", "_connection_problem"),
+      water_warning: mappedDeviceEntities.water_warning || this._entityBySuffix("binary_sensor", ["_water_warning", "_problem_2"]),
+      device_locked: mappedDeviceEntities.device_locked || this._entityBySuffix("binary_sensor", ["_device_locked", "_problem"]),
+      outlet_blocked: mappedChannelEntities.outlet_blocked || this._entityBySuffix("binary_sensor", `_outlet_${channel}_blocked`),
+      outlet_locked: mappedChannelEntities.outlet_locked || this._entityBySuffix("binary_sensor", `_outlet_${channel}_locked`),
+      sensor_fault: mappedChannelEntities.sensor_fault || this._entityBySuffix("binary_sensor", `_sensor_${channel}_fault`),
+      sensor_disconnected: mappedChannelEntities.sensor_disconnected || this._entityBySuffix("binary_sensor", `_sensor_${channel}_disconnected`),
+      watering_issue: mappedChannelEntities.watering_issue || this._entityBySuffix("binary_sensor", `_watering_issue_${channel}`),
+      watering_locked: mappedChannelEntities.watering_locked || this._entityBySuffix("binary_sensor", `_watering_locked_${channel}`),
+      temperature: mappedDeviceEntities.temperature || this._entityBySuffix("sensor", "_temperature"),
+      humidity: mappedDeviceEntities.humidity || this._entityBySuffix("sensor", "_humidity"),
+      tank_remaining: mappedDeviceEntities.tank_remaining || this._entityBySuffix("sensor", "_tank_remaining"),
+      tank_level: mappedDeviceEntities.tank_level || this._entityBySuffix("sensor", "_tank_level"),
+      tank_days_left: mappedDeviceEntities.tank_days_left || this._entityBySuffix("sensor", "_tank_days_left"),
+      tank_capacity: mappedDeviceEntities.tank_capacity || this._entityBySuffix("number", "_tank_capacity"),
+      mark_tank_full: mappedDeviceEntities.mark_tank_full || this._entityBySuffix("button", "_mark_tank_full"),
+    };
+    return {
+      ...entities,
+      ...explicit,
+      moisture: entities.moisture,
+      load_history: entities.load_history,
+      history_count: entities.history_count,
+    };
+  }
+
+  async _loadGraphHistory() {
+    if (!this._hass || (!this._config?.graph && !this._config?.detail) || this._historyLoading) {
+      return;
+    }
+    const entityId = this._entities().moisture;
+    if (!entityId || !this._hass.callApi) {
+      return;
+    }
+    const hours = this._historyHours();
+    const cacheMs = 60 * 1000;
+    if (
+      this._historyEntity === entityId
+      && this._historyLoadedAt
+      && Date.now() - this._historyLoadedAt < cacheMs
+    ) {
+      return;
+    }
+
+    this._historyLoading = true;
+    this._historyError = "";
+    const start = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+    try {
+      const result = await this._hass.callApi(
+        "GET",
+        `history/period/${encodeURIComponent(start)}?filter_entity_id=${encodeURIComponent(entityId)}&minimal_response&no_attributes`,
+      );
+      const states = Array.isArray(result?.[0]) ? result[0] : [];
+      this._history = this._smoothGraphPoints(
+        states
+          .map((item) => ({
+            t: new Date(item.last_changed || item.last_updated).getTime(),
+            v: Number(item.state),
+          }))
+          .filter((point) => Number.isFinite(point.t) && Number.isFinite(point.v) && point.v >= 0 && point.v <= 100),
+      );
+      this._historyEntity = entityId;
+      this._historyLoadedAt = Date.now();
+    } catch (error) {
+      this._historyError = "History unavailable";
+    } finally {
+      this._historyLoading = false;
+      this._render();
+    }
+  }
+
+  _historyHours() {
+    return this._clamp(Number(this._historyWindowHours) || 168, 1, 168);
+  }
+
+  _setHistoryHours(hours) {
+    this._historyWindowHours = this._clamp(Number(hours) || 168, 1, 168);
+    this._historyLoadedAt = 0;
+    this._render();
+    this._loadGraphHistory();
+  }
+
+  _smoothGraphPoints(points) {
+    if (points.length < 3) {
+      return points;
+    }
+    const filtered = points.map((point, index) => {
+      const prev = points[index - 1];
+      const next = points[index + 1];
+      if (!prev || !next) {
+        return point;
+      }
+      const isolatedSpike = Math.abs(point.v - prev.v) > 18
+        && Math.abs(point.v - next.v) > 18
+        && Math.abs(prev.v - next.v) < 8;
+      return isolatedSpike ? { ...point, v: (prev.v + next.v) / 2 } : point;
+    });
+
+    return filtered.map((point, index) => {
+      const prev = filtered[index - 1] || point;
+      const next = filtered[index + 1] || point;
+      return {
+        ...point,
+        v: (prev.v + point.v * 2 + next.v) / 4,
+      };
+    });
+  }
+
+  _extendFreshHistoryToNow(points, now) {
+    if (!points.length) {
+      return points;
+    }
+    const last = points[points.length - 1];
+    const maxHoldMs = 2 * 60 * 60 * 1000;
+    const ageMs = now - last.t;
+    if (ageMs <= 0 || ageMs > maxHoldMs) {
+      return points;
+    }
+    return [
+      ...points,
+      {
+        ...last,
+        t: now,
+      },
+    ];
+  }
+
+  _graphPath(points, width, height, padding, leftPadding = padding, timeStart = undefined, timeEnd = undefined) {
+    if (!points.length) {
+      return "";
+    }
+    const coords = this._graphCoordinates(points, width, height, padding, leftPadding, timeStart, timeEnd);
+    if (coords.length === 1) {
+      const { x, y } = coords[0];
+      return `M ${x} ${y} L ${x + 1} ${y}`;
+    }
+    return coords.reduce((path, point, index) => {
+      if (index === 0) {
+        return `M ${point.x} ${point.y}`;
+      }
+      const prev = coords[index - 1];
+      const cx = (prev.x + point.x) / 2;
+      return `${path} C ${cx} ${prev.y}, ${cx} ${point.y}, ${point.x} ${point.y}`;
+    }, "");
+  }
+
+  _graphCoordinates(points, width, height, padding, leftPadding = padding, timeStart = undefined, timeEnd = undefined) {
+    if (!points.length) {
+      return [];
+    }
+    const minTime = Number.isFinite(timeStart) ? timeStart : points[0].t;
+    const maxTime = Number.isFinite(timeEnd) ? timeEnd : points[points.length - 1].t;
+    const timeRange = Math.max(1, maxTime - minTime);
+    const xFor = (point) => leftPadding + ((point.t - minTime) / timeRange) * (width - leftPadding - padding);
+    const yFor = (point) => padding + (1 - this._clamp(point.v, 0, 100) / 100) * (height - padding * 2);
+    return points.map((point) => ({ ...point, x: xFor(point), y: yFor(point) }));
+  }
+
+  _formatChartHoverDate(timestamp) {
+    if (!timestamp) {
+      return "";
+    }
+    return new Date(timestamp).toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }
+
+  _entityState(entityId, fallback = "Unknown") {
+    const state = this._state(entityId);
+    if (!state || state.state === "unknown" || state.state === "unavailable") {
+      return fallback;
+    }
+    return state.state;
+  }
+
+  _deviceIdHint() {
+    const queryDevice = new URLSearchParams(window.location?.search || "").get("device");
+    if (queryDevice) {
+      return String(queryDevice).trim();
+    }
+    const prefix = this._config.entity_prefix || this._config.device_prefix || this._config.device || "";
+    if (prefix) {
+      return String(prefix).replace(/^sensor\./, "");
+    }
+    const entityId = this._entityBySuffix("sensor", "_temperature")
+      || this._entityBySuffix("sensor", "_moisture_a")
+      || this._entityBySuffix("button", "_load_history_a")
+      || "";
+    const objectId = entityId.split(".", 2)[1] || "";
+    const deviceMatch = objectId.match(/^(growcube_[^_]+(?:_[^_]+)*)_(?:temperature|humidity|tank_remaining|tank_level|tank_days_left|moisture_[abcd]|load_history_[abcd])$/);
+    return deviceMatch ? deviceMatch[1] : "";
+  }
+
+  _apiHistoryState(channel = this._channelKey()) {
+    const data = this._cubeHistory[channel];
+    if (!data) {
+      return undefined;
+    }
+    return {
+      state: String(data.history_points ?? data.history?.length ?? 0),
+      attributes: {
+        history_loading: Boolean(data.history_loading || this._cubeHistoryLoading[channel]),
+        history_complete: Boolean(data.history_complete),
+        watering_events_complete: Boolean(data.watering_events_complete),
+        history_points: data.history_points ?? data.history?.length ?? 0,
+        type_category: data.type_category || "",
+        type_description: data.type_description || "",
+        temp_min: Number(data.temp_min) || 0,
+        temp_max: Number(data.temp_max) || 0,
+        air_humidity_min: Number(data.air_humidity_min) || 0,
+        air_humidity_max: Number(data.air_humidity_max) || 0,
+        history: Array.isArray(data.history) ? data.history : [],
+        watering_events: Array.isArray(data.watering_events) ? data.watering_events : [],
+      },
+    };
+  }
+
+  _detailHistoryState(entities) {
+    const channel = this._channelKey();
+    const apiState = this._apiHistoryState(channel);
+    const entityState = this._state(entities.history_count);
+    if (!apiState) {
+      return entityState;
+    }
+    if (!entityState) {
+      return apiState;
+    }
+    const apiAttributes = apiState.attributes || {};
+    const entityAttributes = entityState.attributes || {};
+    const history = this._mergeHistoryItems(entityAttributes.history, apiAttributes.history, "timestamp");
+    const wateringEvents = this._mergeHistoryItems(entityAttributes.watering_events, apiAttributes.watering_events, (item) => (
+      typeof item === "string" ? item : item?.timestamp
+    ));
+    return {
+      ...entityState,
+      state: String(Math.max(Number(entityState.state) || 0, Number(apiState.state) || 0, history.length)),
+      attributes: {
+        ...entityAttributes,
+        ...apiAttributes,
+        history_loading: Boolean(entityAttributes.history_loading || apiAttributes.history_loading),
+        history_complete: Boolean(entityAttributes.history_complete || apiAttributes.history_complete),
+        watering_events_complete: Boolean(
+          entityAttributes.watering_events_complete || apiAttributes.watering_events_complete,
+        ),
+        history_points: Math.max(
+          Number(entityAttributes.history_points) || 0,
+          Number(apiAttributes.history_points) || 0,
+          history.length,
+        ),
+        history,
+        watering_events: wateringEvents,
+      },
+    };
+  }
+
+  _mergeHistoryItems(first, second, keySelector) {
+    const keyFn = typeof keySelector === "function" ? keySelector : (item) => item?.[keySelector];
+    const merged = new Map();
+    [first, second].forEach((items) => {
+      if (!Array.isArray(items)) {
+        return;
+      }
+      items.forEach((item) => {
+        const key = keyFn(item);
+        if (key) {
+          merged.set(key, item);
+        }
+      });
+    });
+    return Array.from(merged.values());
+  }
+
+  async _loadCubeHistoryApiIfNeeded(force = false) {
+    if (!this._hass?.callApi || !this._config?.detail) {
+      return;
+    }
+    const channel = this._channelKey();
+    const now = Date.now();
+    const cached = this._cubeHistory[channel];
+    const cacheMs = cached?.history_complete && cached?.watering_events_complete ? 5 * 60 * 1000 : 2500;
+    if (!force && this._cubeHistoryLoadedAt[channel] && now - this._cubeHistoryLoadedAt[channel] < cacheMs) {
+      return;
+    }
+    if (this._cubeHistoryLoading[channel]) {
+      return;
+    }
+    this._cubeHistoryLoading[channel] = true;
+    try {
+      const shouldRequest = !cached?.history_complete || !cached?.watering_events_complete;
+      const params = new URLSearchParams({
+        channel,
+        request: shouldRequest ? "1" : "0",
+      });
+      const deviceId = this._deviceIdHint();
+      if (deviceId) {
+        params.set("device_id", deviceId);
+      }
+      const result = await this._hass.callApi("GET", `growcube/history?${params.toString()}`);
+      this._cubeHistory[channel] = result || {};
+      this._cubeHistoryLoadedAt[channel] = Date.now();
+    } catch (error) {
+      this._cubeHistory[channel] = {
+        history_loading: false,
+        history_complete: false,
+        watering_events_complete: false,
+        history_points: 0,
+        history: [],
+        watering_events: [],
+      };
+      this._cubeHistoryLoadedAt[channel] = Date.now();
+    } finally {
+      this._cubeHistoryLoading[channel] = false;
+      const complete = Boolean(this._cubeHistory[channel]?.history_complete);
+      const eventsComplete = Boolean(this._cubeHistory[channel]?.watering_events_complete);
+      if (complete && eventsComplete && this._cubeHistoryPollTimer) {
+        clearTimeout(this._cubeHistoryPollTimer);
+        this._cubeHistoryPollTimer = null;
+      } else if (
+        this._config?.detail
+        && (!complete || !eventsComplete)
+      ) {
+        if (this._cubeHistoryPollTimer) {
+          clearTimeout(this._cubeHistoryPollTimer);
+        }
+        this._cubeHistoryPollTimer = setTimeout(() => {
+          this._loadCubeHistoryApiIfNeeded(true);
+        }, 3000);
+      }
+      this._render();
+    }
+  }
+
+  _entityDisplay(entityId, fallback = "Unknown") {
+    const state = this._state(entityId);
+    if (!state || state.state === "unknown" || state.state === "unavailable") {
+      return fallback;
+    }
+    try {
+      if (this._hass.formatEntityState) {
+        return this._hass.formatEntityState(state);
+      }
+    } catch (error) {
+      return state.state;
+    }
+    return state.state;
+  }
+
+  _nextWateringDisplay(entityId, fallback = "Unknown") {
+    const state = this._state(entityId);
+    if (!state || state.state === "unknown" || state.state === "unavailable") {
+      return fallback;
+    }
+    const timestamp = new Date(state.state);
+    if (Number.isNaN(timestamp.getTime())) {
+      return this._entityDisplay(entityId, fallback);
+    }
+    const dateText = timestamp.toLocaleDateString(undefined, {
+      day: "numeric",
+      month: "long",
+    });
+    const timeText = timestamp.toLocaleTimeString(undefined, {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+    return `${dateText} ${timeText}`;
+  }
+
+  _number(entityId, fallback = 0) {
+    const value = Number(this._entityState(entityId, fallback));
+    return Number.isFinite(value) ? value : fallback;
+  }
+
+  _plantName() {
+    return this._entityDisplay(this._entities().name, this._config.name || `Plant ${this._channelLabel()}`);
+  }
+
+  _modeOptions() {
+    return ["Disabled", "Repeating", "Smart"];
+  }
+
+  _normalizeMode(mode) {
+    return mode === "Timed" || mode === "Repeating" ? "Repeating" : mode;
+  }
+
+  _modeDisplay(mode) {
+    const normalized = this._normalizeMode(mode);
+    return normalized === "Repeating" ? "Timed" : normalized;
+  }
+
+  async _call(domain, service, data) {
+    if (!this._hass) {
+      return;
+    }
+    await this._hass.callService(domain, service, data);
+  }
+
+  async _setNumber(entityId, value) {
+    await this._call("number", "set_value", {
+      entity_id: entityId,
+      value: Number(value),
+    });
+  }
+
+  async _setText(entityId, value) {
+    await this._call("text", "set_value", { entity_id: entityId, value });
+  }
+
+  async _setTime(entityId, value) {
+    await this._call("time", "set_value", {
+      entity_id: entityId,
+      time: value.length === 5 ? `${value}:00` : value,
+    });
+  }
+
+  async _setSelect(entityId, option) {
+    await this._call("select", "select_option", { entity_id: entityId, option });
+  }
+
+  async _setSwitch(entityId, value) {
+    if (!entityId) {
+      return;
+    }
+    await this._call("switch", value ? "turn_on" : "turn_off", { entity_id: entityId });
+  }
+
+  async _press(entityId) {
+    await this._call("button", "press", { entity_id: entityId });
+  }
+
+  async _toggleSwitch(entityId) {
+    if (!entityId) {
+      throw new Error("Daytime watering entity is unavailable");
+    }
+    await this._call("switch", "toggle", { entity_id: entityId });
   }
 
   _isOn(entityId) {
     return this._state(entityId)?.state === "on";
   }
 
-  _entityState(entityId, fallback = "Unknown") {
-    const state = this._state(entityId);
-    if (!state || ["unknown", "unavailable", ""].includes(state.state)) {
-      return fallback;
+  _loadDismissedProblems() {
+    try {
+      return JSON.parse(localStorage.getItem("growcube.dismissedProblems") || "{}") || {};
+    } catch (error) {
+      return {};
     }
-    return state.state;
   }
 
-  _display(entityId, fallback = "Unknown") {
-    const state = this._state(entityId);
-    if (!state || ["unknown", "unavailable", ""].includes(state.state)) {
-      return fallback;
+  _problemDismissKey(entityId, kind) {
+    return entityId ? `${kind}:${entityId}` : "";
+  }
+
+  _isProblemDismissed(entityId, kind) {
+    const key = this._problemDismissKey(entityId, kind);
+    return Boolean(key && this._dismissedProblems[key]);
+  }
+
+  _dismissProblem(entityId, kind) {
+    const key = this._problemDismissKey(entityId, kind);
+    if (!key) {
+      return;
     }
-    return `${state.state}${state.attributes?.unit_of_measurement || ""}`;
+    this._dismissedProblems = {
+      ...this._dismissedProblems,
+      [key]: Date.now(),
+    };
+    localStorage.setItem("growcube.dismissedProblems", JSON.stringify(this._dismissedProblems));
+    this._showToast("Alert hidden");
   }
 
-  _plantName(channel) {
-    const entities = this._entities(channel);
-    const name = this._entityState(entities.name, "");
-    return name || `Plant ${channel.toUpperCase()}`;
+  _isPlantConfigured(entities, missingFallback = true) {
+    const configured = this._state(entities.plant_configured);
+    if (!configured) {
+      return missingFallback;
+    }
+    return configured.state === "on";
   }
 
-  _plantPhoto(channel) {
-    return this._entityState(this._entities(channel).photo_url, "");
-  }
-
-  _isConfigured(channel) {
-    const entity = this._entities(channel).plant_configured;
-    return !entity || this._isOn(entity);
-  }
-
-  _problems(entities) {
+  _problemItems(entities) {
     const items = [];
-    if (this._isOn(entities.water_warning)) items.push("Water tank warning");
-    if (this._isOn(entities.device_locked)) items.push("Device locked");
-    if (this._isOn(entities.outlet_blocked)) items.push("Outlet blocked");
-    if (this._isOn(entities.outlet_locked)) items.push("Outlet locked");
-    if (this._isOn(entities.sensor_fault)) items.push("Sensor fault");
-    if (this._isOn(entities.sensor_disconnected)) items.push("Sensor disconnected");
-    if (this._isOn(entities.watering_issue)) items.push("Smart watering issue");
-    if (this._isOn(entities.watering_locked)) items.push("Smart watering locked");
+    if (this._isOn(entities.connection_problem)) {
+      items.push({ label: "Connection problem", severity: "danger" });
+    }
+    if (this._isOn(entities.water_warning)) {
+      items.push({ label: "Water low", severity: "danger" });
+    }
+    if (this._isOn(entities.device_locked)) {
+      items.push({ label: "Device locked", severity: "danger" });
+    }
+    if (this._isOn(entities.outlet_blocked)) {
+      items.push({ label: "Pump blocked", severity: "danger" });
+    }
+    if (this._isOn(entities.outlet_locked)) {
+      items.push({ label: "Outlet locked", severity: "danger" });
+    }
+    if (this._isOn(entities.watering_locked)) {
+      items.push({ label: "Smart watering locked", severity: "danger" });
+    } else if (this._isOn(entities.watering_issue) && !this._isProblemDismissed(entities.watering_issue, "watering_issue")) {
+      items.push({
+        label: "Smart watering issue",
+        severity: "warning",
+        dismissible: true,
+        dismissEntity: entities.watering_issue,
+        dismissKind: "watering_issue",
+      });
+    }
+    if (this._isOn(entities.sensor_fault) || this._isOn(entities.sensor_disconnected)) {
+      items.push({ label: "Sensor offline", severity: "warning" });
+    }
     return items;
   }
 
-  _press(entityId) {
-    if (this._hass && entityId && this._state(entityId)) {
-      this._hass.callService("button", "press", { entity_id: entityId });
+  _wateringBlocked(problemItems) {
+    return problemItems.some((item) => item.label !== "Sensor offline");
+  }
+
+  _showToast(message) {
+    this._toast = message;
+    if (this._toastTimer) {
+      clearTimeout(this._toastTimer);
+    }
+    this._toastTimer = setTimeout(() => {
+      this._toast = "";
+      this._render();
+    }, 2600);
+    this._render();
+  }
+
+  _showError(message) {
+    this._showToast(message || "Action failed");
+  }
+
+  _openWateringDialog() {
+    const manualDuration = this._entities().manual_duration;
+    this._wateringSeconds = this._number(manualDuration, 50);
+    this._wateringOpen = true;
+    this._render();
+  }
+
+  _closeWateringDialog() {
+    this._wateringOpen = false;
+    this._render();
+  }
+
+  _openReservoirDialog(entityId = this._entities().tank_capacity, currentAmount = undefined) {
+    const tankCapacity = entityId || this._entities().tank_capacity;
+    this._reservoirAmount = this._number(tankCapacity, 1500);
+    if (Number.isFinite(Number(currentAmount))) {
+      this._reservoirAmount = Number(currentAmount);
+    }
+    this._reservoirTargetEntity = tankCapacity;
+    this._reservoirOpen = true;
+    this._render();
+  }
+
+  _openReservoirGuide(entityId = this._entities().tank_capacity, currentAmount = undefined) {
+    this._pendingReservoirEntity = entityId || this._entities().tank_capacity;
+    this._pendingReservoirAmount = currentAmount;
+    if (localStorage.getItem("growcube.hideExternalReservoirGuide") === "1") {
+      this._openReservoirDialog(this._pendingReservoirEntity, this._pendingReservoirAmount);
+      return;
+    }
+    this._reservoirGuideOpen = true;
+    this._reservoirGuideStep = 0;
+    this._reservoirGuideDontShow = false;
+    this._render();
+  }
+
+  _closeReservoirGuide() {
+    this._reservoirGuideOpen = false;
+    this._pendingReservoirEntity = "";
+    this._pendingReservoirAmount = undefined;
+    this._render();
+  }
+
+  _setReservoirGuideStep(step) {
+    this._reservoirGuideStep = this._clamp(Number(step), 0, this._reservoirGuideSteps().length - 1);
+    this._render();
+  }
+
+  _continueReservoirGuide() {
+    if (this._reservoirGuideDontShow) {
+      localStorage.setItem("growcube.hideExternalReservoirGuide", "1");
+    }
+    const entityId = this._pendingReservoirEntity;
+    const amount = this._pendingReservoirAmount;
+    this._reservoirGuideOpen = false;
+    this._pendingReservoirEntity = "";
+    this._pendingReservoirAmount = undefined;
+    this._openReservoirDialog(entityId, amount);
+  }
+
+  _closeReservoirDialog() {
+    this._reservoirOpen = false;
+    this._reservoirTargetEntity = "";
+    this._render();
+  }
+
+  _openModeWizard() {
+    const entities = this._entities();
+    const mode = this._normalizeMode(this._entityState(entities.mode, "Smart"));
+    const [hour, minute] = this._splitTime(this._entityState(entities.first_watering_time, ""));
+    this._modeWizardMode = mode === "Repeating" ? "Repeating" : "Smart";
+    this._modeWizardAmount = this._clamp(this._number(entities.duration, 50), 10, 500);
+    this._modeWizardIntervalDays = this._clamp(Math.max(1, Math.round(this._number(entities.interval, 24) / 24)), 1, 10);
+    this._modeWizardStartHour = hour;
+    this._modeWizardStartMinute = minute;
+    this._modeWizardSmartMin = this._clamp(this._number(entities.smart_min_moisture, 20), 1, 98);
+    this._modeWizardSmartMax = this._clamp(
+      this._number(entities.smart_max_moisture, 60),
+      this._modeWizardSmartMin + 1,
+      99,
+    );
+    this._modeWizardDaytime = this._isOn(entities.smart_daytime_watering);
+    this._modeWizardStep = 0;
+    this._modeWizardOpen = true;
+    this._render();
+  }
+
+  _closeModeWizard() {
+    this._modeWizardOpen = false;
+    this._render();
+  }
+
+  _setModeWizardStep(step) {
+    this._modeWizardStep = this._clamp(Number(step), 0, 1);
+    this._render();
+  }
+
+  _canAdvanceModeWizard() {
+    return this._modeWizardMode === "Smart" || this._modeWizardMode === "Repeating";
+  }
+
+  _modeWizardStartTime() {
+    const hour = this._clamp(Number(this._modeWizardStartHour), 0, 23);
+    const minute = this._clamp(Number(this._modeWizardStartMinute), 0, 59);
+    return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00`;
+  }
+
+  async _disableModeWizard() {
+    const entities = this._entities();
+    try {
+      if (!entities.mode) {
+        throw new Error("Mode entity is unavailable");
+      }
+      await this._setSelect(entities.mode, "Disabled");
+      await this._saveScheduleAfterEdit("Automatic watering disabled");
+      this._modeWizardOpen = false;
+      this._render();
+    } catch (error) {
+      this._showError(error?.message || "Could not disable automatic watering");
     }
   }
 
-  _moreInfo(entityId) {
-    if (!entityId) return;
+  _openPlantWizard() {
+    const channel = this._firstAvailableChannel();
+    this._plantWizardChannel = channel;
+    this._plantWizardStep = 0;
+    this._plantWizardName = "";
+    this._plantWizardPhotoUrl = "";
+    this._plantWizardMode = "Smart";
+    this._plantWizardAmount = 50;
+    this._plantWizardIntervalDays = 1;
+    this._plantWizardStartHour = 8;
+    this._plantWizardStartMinute = 0;
+    this._plantWizardSmartMin = 20;
+    this._plantWizardSmartMax = 60;
+    this._plantWizardDaytime = true;
+    this._plantWizardSearch = "";
+    this._plantWizardResults = [];
+    this._plantWizardResultPage = 0;
+    this._plantWizardSelected = null;
+    this._plantWizardCustom = false;
+    this._plantWizardLoading = false;
+    this._plantWizardError = "";
+    this._plantWizardOpen = true;
+    this._render();
+  }
+
+  _closePlantWizard() {
+    this._plantWizardOpen = false;
+    this._render();
+  }
+
+  _setPlantWizardStep(step) {
+    this._plantWizardStep = this._clamp(Number(step), 0, 5);
+    this._render();
+  }
+
+  _canAdvancePlantWizard() {
+    if (this._plantWizardStep === 0) {
+      return Boolean(this._plantWizardSelected);
+    }
+    if (this._plantWizardStep === 1) {
+      return Boolean(this._plantWizardSelected);
+    }
+    if (this._plantWizardStep === 2) {
+      return Boolean(this._plantWizardChannel);
+    }
+    if (this._plantWizardStep === 3) {
+      return this._plantWizardMode === "Smart" || this._plantWizardMode === "Repeating";
+    }
+    return true;
+  }
+
+  async _confirmWatering() {
+    const entities = this._entities();
+    const amountMl = this._clamp(Number(this._entityState(entities.manual_duration, 50)) || 50, 30, 150);
+    try {
+      if (entities.manual_duration) {
+        await this._setNumber(entities.manual_duration, amountMl);
+      }
+      await this._press(entities.water);
+      this._refreshCurrentHistorySoon();
+      this._wateringOpen = false;
+      this._showToast(`Watering started: ${amountMl} mL`);
+    } catch (error) {
+      this._wateringOpen = false;
+      this._showError("Watering failed");
+    }
+  }
+
+  _refreshCurrentHistorySoon() {
+    const channel = this._channelKey();
+    delete this._cubeHistory[channel];
+    delete this._cubeHistoryLoadedAt[channel];
+    window.setTimeout(() => this._loadCubeHistoryApiIfNeeded(true), 1000);
+  }
+
+  async _refreshCurrentHistory() {
+    const entities = this._entities();
+    const channel = this._channelKey();
+    delete this._cubeHistory[channel];
+    delete this._cubeHistoryLoadedAt[channel];
+    if (entities.history_count) {
+      delete this._cubeHistoryRequestedAt[entities.history_count];
+    }
+    try {
+      if (entities.load_history) {
+        await this._press(entities.load_history);
+      }
+      await this._loadCubeHistoryApiIfNeeded(true);
+      this._showToast("Refreshing moisture history");
+    } catch (error) {
+      this._showError("Could not refresh history");
+    }
+  }
+
+  async _confirmReservoir() {
+    const amountMl = this._clamp(Number(this._reservoirAmount) || 1500, 500, 50000);
+    try {
+      await this._setNumber(this._reservoirTargetEntity || this._entities().tank_capacity, amountMl);
+      this._reservoirOpen = false;
+      this._reservoirTargetEntity = "";
+      this._showToast(`Reservoir set to ${amountMl} mL`);
+    } catch (error) {
+      this._reservoirOpen = false;
+      this._reservoirTargetEntity = "";
+      this._showError("Could not update capacity");
+    }
+  }
+
+  async _confirmAddPlant() {
+    const channel = this._plantWizardChannel || this._firstAvailableChannel();
+    const entities = this._entities(channel);
+    try {
+      if (entities.name && this._plantWizardName.trim()) {
+        await this._setText(entities.name, this._plantWizardName.trim());
+      }
+      if (entities.photo_url && this._plantWizardPhotoUrl.trim()) {
+        await this._setText(entities.photo_url, this._plantWizardPhotoUrl.trim());
+      }
+      if (entities.mode) {
+        await this._setSelect(entities.mode, this._normalizeMode(this._plantWizardMode || "Disabled"));
+      }
+      if (this._plantWizardMode === "Smart") {
+        if (entities.smart_min_moisture) {
+          await this._setNumber(entities.smart_min_moisture, this._plantWizardSmartMin);
+        }
+        if (entities.smart_max_moisture) {
+          await this._setNumber(entities.smart_max_moisture, this._plantWizardSmartMax);
+        }
+        await this._setSwitch(entities.smart_daytime_watering, this._plantWizardDaytime);
+      } else if (this._plantWizardMode === "Repeating") {
+        if (entities.first_watering_time) {
+          await this._setTime(entities.first_watering_time, this._plantWizardStartTime());
+        }
+        if (entities.duration) {
+          await this._setNumber(entities.duration, this._plantWizardAmount);
+        }
+        if (entities.interval) {
+          await this._setNumber(entities.interval, this._plantWizardIntervalDays * 24);
+        }
+      }
+      await this._press(entities.add_plant);
+      if (this._plantWizardMode === "Smart" || this._plantWizardMode === "Repeating") {
+        if (!entities.save) {
+          throw new Error("Save watering entity is unavailable");
+        }
+        await this._press(entities.save);
+      }
+      this._plantWizardOpen = false;
+      this._showToast("Plant added");
+    } catch (error) {
+      this._showError(error?.message || "Could not add plant");
+    }
+  }
+
+  async _searchPlantCatalog() {
+    if (!this._hass?.callApi || this._plantWizardSearch.trim().length < 2) {
+      this._plantWizardResults = [];
+      this._plantWizardResultPage = 0;
+      this._plantWizardError = this._plantWizardSearch.trim() ? "Type at least 2 characters" : "";
+      this._render();
+      return;
+    }
+    this._plantWizardLoading = true;
+    this._plantWizardError = "";
+    this._render();
+    try {
+      const result = await this._hass.callApi(
+        "GET",
+        `growcube/plants/search?query=${encodeURIComponent(this._plantWizardSearch.trim())}`,
+      );
+      this._plantWizardResults = Array.isArray(result?.plants) ? result.plants : [];
+      this._plantWizardResultPage = 0;
+      this._plantWizardError = this._plantWizardResults.length ? "" : "No plants found";
+    } catch (error) {
+      this._plantWizardResults = [];
+      this._plantWizardResultPage = 0;
+      this._plantWizardError = "Catalog unavailable";
+    } finally {
+      this._plantWizardLoading = false;
+      this._render();
+    }
+  }
+
+  _selectPlantCatalogItem(index) {
+    const item = this._plantWizardResults[Number(index)];
+    if (!item) {
+      return;
+    }
+    this._plantWizardSelected = item;
+    this._plantWizardCustom = false;
+    this._plantWizardName = item.display_name || item.name || this._plantWizardName;
+    this._plantWizardPhotoUrl = item.image_url || "";
+    this._plantWizardMode = "Smart";
+    this._plantWizardSmartMin = this._clamp(Number(item.moisture_min) || 20, 1, 98);
+    this._plantWizardSmartMax = this._clamp(Number(item.moisture_max) || 60, this._plantWizardSmartMin + 1, 99);
+    this._plantWizardStep = 1;
+    this._render();
+  }
+
+  _changePlantWizardResultPage(delta) {
+    const pages = this._plantWizardResultPages();
+    this._plantWizardResultPage = this._clamp(this._plantWizardResultPage + delta, 0, Math.max(0, pages - 1));
+    this._render();
+  }
+
+  _plantWizardResultPages() {
+    return Math.max(1, Math.ceil(this._plantWizardResults.length / 3));
+  }
+
+  _navigate() {
+    const path = this._config.navigation_path || this._defaultNavigationPath(undefined, this._selectedDeviceId());
+    if (!path) {
+      return;
+    }
+    window.history.pushState(null, "", path);
+    window.dispatchEvent(new CustomEvent("location-changed"));
+  }
+
+  _navigateToChannel(channel, deviceId = this._selectedDeviceId()) {
+    const path = this._defaultNavigationPath(channel, deviceId);
+    if (!path) {
+      return;
+    }
+    window.history.pushState(null, "", path);
+    window.dispatchEvent(new CustomEvent("location-changed"));
+  }
+
+  _defaultNavigationPath(channel = undefined, deviceId = "") {
+    if (this._config.detail) {
+      return "";
+    }
+    const parts = window.location.pathname.split("/").filter(Boolean);
+    if (!parts.length) {
+      return "";
+    }
+    const query = deviceId ? `?device=${encodeURIComponent(deviceId)}` : "";
+    return `/${parts[0]}/growcube-plant-${this._channelKey(channel)}${query}`;
+  }
+
+  _showMoreInfo(entityId) {
+    if (!entityId) {
+      return;
+    }
     this.dispatchEvent(new CustomEvent("hass-more-info", {
       bubbles: true,
       composed: true,
@@ -176,282 +1232,3938 @@ class GrowcubeCard extends HTMLElement {
     }));
   }
 
-  _navigate(channel) {
-    const current = window.location?.pathname || "/lovelace/growcube";
-    const base = current
-      .replace(/\/growcube-plant-[abcd]\/?$/i, "")
-      .replace(/\/growcube\/?$/i, "")
-      .replace(/\/$/, "");
-    const path = `${base || "/lovelace"}/growcube-plant-${channel}`;
-    window.history.pushState(null, "", path);
-    window.dispatchEvent(new CustomEvent("location-changed"));
+  _detailBackPath() {
+    const currentPath = window.location.pathname || "/";
+    const withoutPlant = currentPath.replace(/\/growcube-plant-[abcd]\/?$/i, "");
+    const search = window.location.search || "";
+    return `${withoutPlant || "/"}${search}`;
+  }
+
+  _aboutProfileCacheKey() {
+    return `${this._channelKey()}::${this._plantName().trim().toLowerCase()}`;
+  }
+
+  _normalizeProfileText(value) {
+    return String(value || "").trim();
+  }
+
+  _profileHasDetails(profile) {
+    return Boolean(
+      this._normalizeProfileText(profile.category)
+      || this._normalizeProfileText(profile.description)
+      || this._hasRange(profile.tempMin, profile.tempMax)
+      || this._hasRange(profile.airHumidityMin, profile.airHumidityMax)
+    );
+  }
+
+  _selectCatalogProfile(results, plantName) {
+    if (!Array.isArray(results) || !results.length) {
+      return null;
+    }
+    const normalizedPlantName = this._normalizeProfileText(plantName).toLowerCase();
+    const exact = results.find((item) => {
+      const displayName = this._normalizeProfileText(item.display_name).toLowerCase();
+      const name = this._normalizeProfileText(item.name).toLowerCase();
+      return displayName === normalizedPlantName || name === normalizedPlantName;
+    });
+    return exact || results[0] || null;
+  }
+
+  async _ensureAboutProfileData(entities) {
+    const current = this._profileMetadata(entities);
+    if (this._profileHasDetails(current) || !this._hass?.callApi) {
+      return;
+    }
+    const plantName = this._plantName();
+    const query = this._normalizeProfileText(plantName);
+    const cacheKey = this._aboutProfileCacheKey();
+    if (!query || this._aboutProfileCache[cacheKey] || this._aboutProfileLoading) {
+      return;
+    }
+    this._aboutProfileLoading = true;
+    this._render();
+    try {
+      const result = await this._hass.callApi(
+        "GET",
+        `growcube/plants/search?query=${encodeURIComponent(query)}`,
+      );
+      const item = this._selectCatalogProfile(result?.plants, query);
+      if (item) {
+        this._aboutProfileCache[cacheKey] = {
+          category: this._normalizeProfileText(item.category),
+          description: this._normalizeProfileText(item.description),
+          tempMin: Number(item.temp_min) || 0,
+          tempMax: Number(item.temp_max) || 0,
+          airHumidityMin: Number(item.air_humidity_min) || 0,
+          airHumidityMax: Number(item.air_humidity_max) || 0,
+        };
+      }
+    } catch (error) {
+      // Keep About usable even if catalog lookup fails.
+    } finally {
+      this._aboutProfileLoading = false;
+      this._render();
+    }
+  }
+
+  _profileMetadata(entities) {
+    const historyState = this._detailHistoryState(entities);
+    const attrs = historyState?.attributes || {};
+    const fallback = this._aboutProfileCache[this._aboutProfileCacheKey()] || {};
+    return {
+      category: this._normalizeProfileText(attrs.type_category) || this._normalizeProfileText(fallback.category),
+      description: this._normalizeProfileText(attrs.type_description) || this._normalizeProfileText(fallback.description),
+      tempMin: Number(attrs.temp_min) || Number(fallback.tempMin) || 0,
+      tempMax: Number(attrs.temp_max) || Number(fallback.tempMax) || 0,
+      airHumidityMin: Number(attrs.air_humidity_min) || Number(fallback.airHumidityMin) || 0,
+      airHumidityMax: Number(attrs.air_humidity_max) || Number(fallback.airHumidityMax) || 0,
+    };
+  }
+
+  _hasRange(min, max) {
+    return Number(min) !== 0 || Number(max) !== 0;
   }
 
   _render() {
-    if (!this.shadowRoot) return;
-    const dashboard = this._config.overview === "dashboard";
+    if (!this.shadowRoot || !this._config) {
+      return;
+    }
+
+    this._loadDashboardDevicesIfNeeded();
+
+    const entities = this._entities();
+    const deviceRecord = this._deviceRecord();
+    const overview = this._config.overview;
+    const graph = this._config.graph;
     const detail = Boolean(this._config.detail);
+    const dashboard = overview === "dashboard";
+    const mode = this._normalizeMode(this._entityState(entities.mode, "Disabled"));
+    const next = this._nextWateringDisplay(entities.next_watering, "Unknown");
+    const moisture = this._entityDisplay(entities.moisture, "Unknown");
+    const manualDuration = this._number(entities.manual_duration, 50);
+    const firstWatering = this._entityState(entities.first_watering_time, "");
+    const [firstWateringHour, firstWateringMinute] = this._splitTime(firstWatering);
+    const scheduleDuration = this._number(entities.duration, 10);
+    const interval = this._number(entities.interval, 24);
+    const smartMinMoisture = this._number(entities.smart_min_moisture, 20);
+    const smartMaxMoisture = this._number(entities.smart_max_moisture, 60);
+    const smartRange = `${smartMinMoisture}-${smartMaxMoisture}%`;
+    const smartDaytimeWatering = this._isOn(entities.smart_daytime_watering);
+    const problems = this._problemItems(entities);
+    const plantConfigured = this._isPlantConfigured(entities);
+    const legacyChannelCard = !overview && !detail && !graph;
+    const renderLegacyAsPlants = legacyChannelCard && this._channelKey() === "a";
+    if ((legacyChannelCard && !renderLegacyAsPlants) || graph) {
+      this.shadowRoot.innerHTML = "<style>:host { display: none; }</style>";
+      return;
+    }
+
     this.shadowRoot.innerHTML = `
       <style>
-        :host { display:block; width:100%; box-sizing:border-box; }
-        ha-card { overflow:hidden; border-radius:14px; border:1px solid var(--divider-color); background:var(--ha-card-background,var(--card-background-color)); }
-        ha-card.flat { max-width:1660px; margin:18px auto 0; background:transparent; border:0; box-shadow:none; overflow:visible; }
-        .dashboard { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; padding:0 12px; }
-        .column { display:grid; gap:14px; min-width:0; }
-        .card { padding:18px; border-radius:14px; border:1px solid var(--divider-color); background:var(--ha-card-background,var(--card-background-color)); box-shadow:var(--ha-card-box-shadow,none); }
-        .header { display:grid; grid-template-columns:auto minmax(0,1fr) auto; gap:14px; align-items:center; }
-        .plant-icon,.photo { width:42px; height:42px; border-radius:50%; display:grid; place-items:center; color:var(--primary-color); background:color-mix(in srgb,var(--primary-color) 16%,transparent); overflow:hidden; }
-        .photo { width:64px; height:64px; border-radius:10px; }
-        .photo img { width:100%; height:100%; object-fit:cover; }
-        .title { font-size:20px; line-height:1.2; font-weight:650; color:var(--primary-text-color); }
-        .subtitle,.label,.activity-empty { margin-top:4px; color:var(--secondary-text-color); font-size:13px; }
-        .status { display:inline-grid; grid-template-columns:auto auto; gap:7px; align-items:center; color:var(--secondary-text-color); font-weight:600; }
-        .dot { width:10px; height:10px; border-radius:50%; background:var(--success-color); }
-        .dot.off { background:var(--error-color); }
-        .stats { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; margin-top:16px; }
-        .stat { min-width:0; padding:12px; border-radius:10px; border:1px solid var(--divider-color); background:color-mix(in srgb,var(--primary-text-color) 5%,transparent); cursor:pointer; }
-        .value { margin-top:5px; font-size:18px; line-height:1.25; color:var(--primary-text-color); word-break:break-word; }
-        .value.big { font-size:34px; font-weight:730; line-height:1.05; }
-        .plants-list { display:grid; gap:12px; margin-top:16px; }
-        .plant-row { display:grid; grid-template-columns:64px minmax(0,1fr) auto; gap:12px; align-items:center; padding:12px; border:1px solid var(--divider-color); border-radius:10px; background:color-mix(in srgb,var(--primary-text-color) 5%,transparent); cursor:pointer; }
-        .plant-row:hover,.stat:hover { background:color-mix(in srgb,var(--primary-color) 10%,transparent); }
-        .plant-stats { text-align:right; color:var(--secondary-text-color); }
-        .meter { margin-top:14px; }
-        .meter-track { height:10px; border-radius:999px; overflow:hidden; background:color-mix(in srgb,var(--primary-text-color) 12%,transparent); }
-        .meter-fill { height:100%; border-radius:inherit; background:var(--primary-color); }
-        .activity-panel { padding:14px; border:1px solid var(--divider-color); border-radius:12px; background:color-mix(in srgb,var(--primary-text-color) 4%,transparent); }
-        .activity-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:12px; padding:10px 0; border-bottom:1px solid color-mix(in srgb,var(--primary-text-color) 10%,transparent); }
-        .activity-row:last-child { border-bottom:0; }
-        .activity-title { font-weight:650; color:var(--primary-text-color); }
-        .activity-row.problem .activity-title { color:var(--error-color); }
-        .detail { width:calc(100vw - 48px); max-width:960px; margin:22px auto 0; display:grid; gap:14px; }
-        .detail-grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
-        .actions { display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; margin-top:16px; }
-        button { min-height:44px; border:0; border-radius:10px; padding:0 14px; font:inherit; font-weight:650; cursor:pointer; color:var(--text-primary-color); background:var(--primary-color); }
-        button.secondary { color:var(--primary-text-color); background:color-mix(in srgb,var(--primary-text-color) 9%,transparent); border:1px solid var(--divider-color); }
-        button:disabled { opacity:.48; cursor:not-allowed; }
-        .problem { margin-top:12px; padding:11px 12px; border-radius:10px; color:var(--primary-text-color); background:color-mix(in srgb,var(--error-color,#db4437) 14%,transparent); border:1px solid color-mix(in srgb,var(--error-color,#db4437) 40%,transparent); }
-        .empty { padding:22px; color:var(--secondary-text-color); text-align:center; }
-        @media (max-width:900px) { .dashboard,.detail-grid { grid-template-columns:1fr; } }
-        @media (max-width:620px) { .plant-row { grid-template-columns:50px minmax(0,1fr); } .plant-stats { grid-column:2; text-align:left; } .stats,.actions { grid-template-columns:1fr; } }
+        :host {
+          display: block;
+          box-sizing: border-box;
+          width: 100%;
+          max-width: none;
+          margin: 0 auto;
+          overflow: visible;
+        }
+
+        ha-card {
+          overflow: hidden;
+          border-radius: 14px;
+          background: var(--ha-card-background, var(--card-background-color));
+          border: 1px solid var(--divider-color);
+        }
+
+        ha-card.detail-card {
+          width: calc(100vw - 48px);
+          max-width: 960px;
+          margin-top: 22px;
+          margin-left: 50%;
+          transform: translateX(-50%);
+          overflow: visible;
+          background: transparent;
+          border: 0;
+          box-shadow: none;
+        }
+
+        ha-card.dashboard-host-card {
+          overflow: visible;
+          background: transparent;
+          border: 0;
+          box-shadow: none;
+        }
+
+        .card {
+          box-sizing: border-box;
+          padding: 18px;
+          container-type: inline-size;
+        }
+
+        .summary {
+          cursor: pointer;
+        }
+
+        .overview-grid {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 10px;
+          margin-top: 16px;
+        }
+
+        .plants-list {
+          display: grid;
+          gap: 12px;
+          margin-top: 16px;
+        }
+
+        .activity-panel {
+          margin-top: 16px;
+          padding: 14px;
+          border: 1px solid var(--divider-color);
+          border-radius: 12px;
+          background: color-mix(in srgb, var(--primary-text-color) 4%, transparent);
+        }
+
+        .activity-list {
+          display: grid;
+          gap: 10px;
+          margin-top: 10px;
+        }
+
+        .activity-row {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          gap: 12px;
+          align-items: center;
+          padding-bottom: 10px;
+          border-bottom: 1px solid color-mix(in srgb, var(--primary-text-color) 10%, transparent);
+        }
+
+        .activity-row:last-child {
+          padding-bottom: 0;
+          border-bottom: 0;
+        }
+
+        .activity-row.problem .activity-title {
+          color: var(--error-color);
+        }
+
+        .activity-title {
+          font-size: 14px;
+          font-weight: 650;
+          color: var(--primary-text-color);
+        }
+
+        .activity-detail,
+        .activity-time,
+        .activity-empty {
+          margin-top: 2px;
+          font-size: 12px;
+          color: var(--secondary-text-color);
+        }
+
+        .activity-time {
+          margin-top: 0;
+          text-align: right;
+          white-space: nowrap;
+        }
+
+        .plant-row {
+          display: grid;
+          grid-template-columns: 64px minmax(0, 1fr) auto;
+          gap: 12px;
+          align-items: center;
+          padding: 12px;
+          border: 1px solid var(--divider-color);
+          border-radius: 10px;
+          background: color-mix(in srgb, var(--primary-text-color) 5%, transparent);
+          cursor: pointer;
+        }
+
+        .plant-photo {
+          width: 64px;
+          height: 64px;
+          overflow: hidden;
+          border-radius: 10px;
+          background: color-mix(in srgb, var(--primary-color) 16%, transparent);
+          display: grid;
+          place-items: center;
+          color: var(--primary-color);
+        }
+
+        .plant-photo img {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+        }
+
+        .plant-meta {
+          min-width: 0;
+        }
+
+        .plant-stats {
+          text-align: right;
+          color: var(--secondary-text-color);
+        }
+
+        .tank-meter {
+          margin-top: 16px;
+        }
+
+        .meter-track {
+          height: 10px;
+          overflow: hidden;
+          border-radius: 999px;
+          background: color-mix(in srgb, var(--primary-text-color) 12%, transparent);
+        }
+
+        .meter-fill {
+          height: 100%;
+          border-radius: inherit;
+          background: var(--primary-color);
+        }
+
+        .graph-card {
+          cursor: pointer;
+        }
+
+        .chart {
+          width: 100%;
+          height: 180px;
+          margin-top: 18px;
+          overflow: visible;
+        }
+
+        .chart-grid {
+          stroke: color-mix(in srgb, var(--primary-text-color) 12%, transparent);
+          stroke-width: 1;
+        }
+
+        .chart-range-line {
+          stroke: color-mix(in srgb, var(--primary-color) 62%, transparent);
+          stroke-width: 1.6;
+          stroke-dasharray: 6 5;
+        }
+
+        .chart-range-label {
+          fill: var(--primary-color);
+          font-size: 12px;
+          font-weight: 650;
+        }
+
+        .chart-path {
+          fill: none;
+          stroke: var(--primary-color);
+          stroke-width: 3;
+          stroke-linecap: round;
+          stroke-linejoin: round;
+        }
+
+        .chart-fill {
+          fill: transparent;
+        }
+
+        .chart-empty {
+          margin-top: 18px;
+          min-height: 120px;
+          display: grid;
+          place-items: center;
+          color: var(--secondary-text-color);
+        }
+
+        .chart-footer {
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+          align-items: flex-start;
+          margin-top: 6px;
+          font-size: 12px;
+          color: var(--secondary-text-color);
+        }
+
+        .chart-time {
+          display: grid;
+          gap: 2px;
+        }
+
+        .chart-time.end {
+          text-align: right;
+        }
+
+        .chart-time-primary {
+          font-size: 15px;
+          font-weight: 650;
+          line-height: 1.1;
+          color: var(--primary-text-color);
+        }
+
+        .chart-time-secondary {
+          font-size: 11px;
+          line-height: 1.15;
+          color: var(--secondary-text-color);
+          text-transform: uppercase;
+          letter-spacing: 0.04em;
+        }
+
+        .header {
+          display: grid;
+          grid-template-columns: auto 1fr auto;
+          gap: 14px;
+          align-items: center;
+        }
+
+        .dashboard-card {
+          position: relative;
+          display: grid;
+          gap: 14px;
+          box-sizing: border-box;
+          width: 100%;
+          max-width: 1660px;
+          margin: 0 auto;
+          padding: 0 12px;
+        }
+
+        .dashboard-toolbar {
+          position: absolute;
+          top: 10px;
+          right: 22px;
+          z-index: 5;
+        }
+
+        .dashboard-grid {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 14px;
+          align-items: start;
+          padding-top: 18px;
+        }
+
+        .dashboard-card.has-device-switcher .dashboard-grid {
+          padding-top: 62px;
+        }
+
+        .dashboard-column {
+          display: grid;
+          gap: 14px;
+          min-width: 0;
+        }
+
+        .dashboard-card .card {
+          overflow: hidden;
+          border-radius: 14px;
+          background: var(--ha-card-background, var(--card-background-color));
+          border: 1px solid var(--divider-color);
+          box-shadow: var(--ha-card-box-shadow, none);
+        }
+
+        .global-device-switcher {
+          position: relative;
+          display: block;
+        }
+
+        .device-pill {
+          min-width: 0;
+          min-height: 38px;
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          padding: 7px 12px;
+          color: var(--primary-text-color);
+          background: var(--ha-card-background, var(--card-background-color));
+          border: 1px solid var(--divider-color);
+          border-radius: 999px;
+          box-shadow: var(--ha-card-box-shadow, 0 8px 18px rgba(0, 0, 0, 0.22));
+          font-weight: 650;
+          cursor: pointer;
+        }
+
+        .device-pill ha-icon:first-child {
+          color: var(--primary-color);
+        }
+
+        .device-pill ha-icon {
+          --mdc-icon-size: 18px;
+        }
+
+        .device-menu {
+          position: absolute;
+          top: calc(100% + 8px);
+          right: 0;
+          min-width: 230px;
+          padding: 6px;
+          border-radius: 12px;
+          background: var(--ha-card-background, var(--card-background-color));
+          border: 1px solid var(--divider-color);
+          box-shadow: var(--ha-card-box-shadow, 0 14px 30px rgba(0, 0, 0, 0.32));
+        }
+
+        .device-menu button {
+          width: 100%;
+          min-height: 40px;
+          display: grid;
+          grid-template-columns: 22px minmax(0, 1fr);
+          gap: 10px;
+          align-items: center;
+          padding: 8px 10px;
+          border: 0;
+          border-radius: 8px;
+          color: var(--primary-text-color);
+          background: transparent;
+          text-align: left;
+          font: inherit;
+          cursor: pointer;
+        }
+
+        .device-menu button:hover,
+        .device-menu button.active {
+          background: color-mix(in srgb, var(--primary-color) 16%, transparent);
+        }
+
+        .device-menu .check {
+          color: var(--primary-color);
+        }
+
+        .device-menu .name {
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .header-side {
+          display: grid;
+          justify-items: end;
+          gap: 6px;
+          min-width: 0;
+        }
+
+        .plant-icon {
+          width: 42px;
+          height: 42px;
+          border-radius: 50%;
+          display: grid;
+          place-items: center;
+          color: var(--primary-color);
+          background: color-mix(in srgb, var(--primary-color) 16%, transparent);
+        }
+
+        .title {
+          font-size: 20px;
+          line-height: 1.2;
+          font-weight: 650;
+          color: var(--primary-text-color);
+        }
+
+        .subtitle {
+          margin-top: 4px;
+          font-size: 14px;
+          color: var(--secondary-text-color);
+        }
+
+        .stats {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 10px;
+          margin-top: 16px;
+        }
+
+        .stat {
+          border: 1px solid var(--divider-color);
+          border-radius: 10px;
+          background: color-mix(in srgb, var(--primary-text-color) 5%, transparent);
+        }
+
+        .stat {
+          padding: 12px;
+          min-width: 0;
+        }
+
+        .stat[data-action="more-info"],
+        .stat[data-action^="edit-"],
+        .stat[data-action="toggle-smart-daytime"] {
+          cursor: pointer;
+        }
+
+        .stat[data-action="more-info"]:hover,
+        .stat[data-action^="edit-"]:hover,
+        .stat[data-action="toggle-smart-daytime"]:hover {
+          background: color-mix(in srgb, var(--primary-color) 9%, transparent);
+        }
+
+        .label {
+          font-size: 12px;
+          line-height: 1.2;
+          color: var(--secondary-text-color);
+        }
+
+        .value {
+          margin-top: 5px;
+          font-size: 18px;
+          line-height: 1.25;
+          color: var(--primary-text-color);
+          word-break: break-word;
+        }
+
+        .actions {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 10px;
+          margin-top: 16px;
+        }
+
+        .tank-tools {
+          display: grid;
+          gap: 10px;
+          margin-top: 16px;
+        }
+
+        .tool-panel {
+          display: grid;
+          gap: 10px;
+          min-width: 0;
+          padding: 12px;
+          border: 1px solid var(--divider-color);
+          border-radius: 10px;
+          background: color-mix(in srgb, var(--primary-text-color) 5%, transparent);
+        }
+
+        .tool-title {
+          font-size: 14px;
+          font-weight: 650;
+          color: var(--primary-text-color);
+        }
+
+        .compact-row {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          gap: 8px;
+          align-items: end;
+        }
+
+        .choice-row {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 10px;
+        }
+
+        .reservoir-grid {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 10px;
+        }
+
+        button.reservoir-choice {
+          height: auto;
+          min-height: 58px;
+          display: grid;
+          gap: 3px;
+          justify-items: start;
+          align-content: center;
+          text-align: left;
+        }
+
+        .choice-title {
+          font-size: 14px;
+          font-weight: 650;
+        }
+
+        .choice-meta {
+          font-size: 12px;
+          font-weight: 500;
+          color: var(--secondary-text-color);
+        }
+
+        .wide-button {
+          width: 100%;
+          margin-top: 16px;
+        }
+
+        button {
+          height: 44px;
+          border: 0;
+          border-radius: 10px;
+          padding: 0 14px;
+          font: inherit;
+          font-weight: 650;
+          cursor: pointer;
+          color: var(--text-primary-color);
+          background: var(--primary-color);
+        }
+
+        button.secondary {
+          color: var(--primary-text-color);
+          background: color-mix(in srgb, var(--primary-text-color) 9%, transparent);
+          border: 1px solid var(--divider-color);
+        }
+
+        button.danger {
+          color: var(--error-color, #db4437);
+          background: color-mix(in srgb, var(--error-color, #db4437) 14%, transparent);
+          border: 1px solid color-mix(in srgb, var(--error-color, #db4437) 38%, transparent);
+        }
+
+        button.state-button {
+          color: var(--primary-text-color);
+          background: color-mix(in srgb, var(--primary-text-color) 9%, transparent);
+          border: 1px solid var(--divider-color);
+        }
+
+        button.state-button.active {
+          color: var(--primary-text-color);
+          background: color-mix(in srgb, var(--primary-color) 18%, transparent);
+          border-color: color-mix(in srgb, var(--primary-color) 45%, transparent);
+        }
+
+        button:disabled {
+          cursor: not-allowed;
+          opacity: 0.48;
+        }
+
+        .problem-banner {
+          display: grid;
+          grid-template-columns: auto 1fr auto;
+          gap: 10px;
+          align-items: center;
+          margin-top: 16px;
+          padding: 11px 12px;
+          border-radius: 10px;
+          color: var(--primary-text-color);
+          background: color-mix(in srgb, #ffb15c 16%, transparent);
+          border: 1px solid color-mix(in srgb, #ffb15c 42%, transparent);
+        }
+
+        .problem-banner.danger {
+          background: color-mix(in srgb, var(--error-color, #db4437) 14%, transparent);
+          border-color: color-mix(in srgb, var(--error-color, #db4437) 40%, transparent);
+        }
+
+        .problem-title {
+          font-weight: 650;
+        }
+
+        .problem-text {
+          margin-top: 2px;
+          font-size: 13px;
+          color: var(--secondary-text-color);
+        }
+
+        .problem-dismiss {
+          align-self: start;
+        }
+
+        .detail {
+          display: grid;
+          gap: 20px;
+        }
+
+        .detail-flat {
+          width: 100%;
+          max-width: 100%;
+          padding: 0;
+          overflow: visible;
+          border: 0;
+          border-radius: 0;
+          background: transparent;
+        }
+
+        .plant-dashboard {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr);
+          gap: 14px;
+          align-items: stretch;
+        }
+
+        .plant-section {
+          box-sizing: border-box;
+          padding: 12px;
+          border: 1px solid var(--divider-color);
+          border-radius: 10px;
+          background: color-mix(in srgb, var(--primary-text-color) 5%, transparent);
+        }
+
+        .plant-side,
+        .plant-main,
+        .plant-section {
+          display: grid;
+          gap: 14px;
+          min-width: 0;
+        }
+
+        .plant-main {
+          align-content: start;
+          align-self: start;
+        }
+
+        .plant-titlebar {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          gap: 14px;
+          align-items: center;
+          padding-top: 6px;
+        }
+
+        .plant-titlebar .title {
+          cursor: pointer;
+          line-height: 1.08;
+        }
+
+        .plant-titlebar .title:hover {
+          color: var(--primary-color);
+        }
+
+        .plant-menu-anchor {
+          position: relative;
+          justify-self: end;
+          align-self: start;
+        }
+
+        .icon-button {
+          width: 40px;
+          height: 40px;
+          border: 1px solid var(--divider-color);
+          border-radius: 999px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 0;
+          background: color-mix(in srgb, var(--primary-text-color) 4%, transparent);
+          color: var(--secondary-text-color);
+          cursor: pointer;
+        }
+
+        .icon-button:hover {
+          color: var(--primary-text-color);
+          border-color: color-mix(in srgb, var(--primary-color) 36%, var(--divider-color));
+        }
+
+        .icon-button ha-icon {
+          --mdc-icon-size: 20px;
+          transform: none;
+        }
+
+        .detail-menu {
+          position: absolute;
+          top: calc(100% + 8px);
+          right: 0;
+          z-index: 12;
+          width: max-content;
+          min-width: 210px;
+          max-width: min(280px, calc(100vw - 44px));
+          display: grid;
+          gap: 4px;
+          padding: 8px;
+          border: 1px solid var(--divider-color);
+          border-radius: 8px;
+          background: var(--ha-card-background, var(--card-background-color));
+          box-shadow: 0 16px 34px rgba(0, 0, 0, 0.24);
+          transform-origin: top right;
+        }
+
+        .detail-menu button {
+          display: grid;
+          grid-template-columns: 22px minmax(0, 1fr);
+          gap: 10px;
+          align-items: center;
+          width: 100%;
+          justify-content: flex-start;
+          text-align: left;
+          min-height: 42px;
+          padding: 0 12px;
+          border: 0;
+          border-radius: 8px;
+          background: transparent;
+          color: var(--primary-text-color);
+          box-shadow: none;
+        }
+
+        .detail-menu button:hover {
+          background: color-mix(in srgb, var(--primary-text-color) 7%, transparent);
+        }
+
+        .detail-menu ha-icon {
+          --mdc-icon-size: 20px;
+          color: var(--secondary-text-color);
+        }
+
+        .detail-menu .danger {
+          color: #ff5a48;
+        }
+
+        .detail-menu .danger ha-icon {
+          color: #ff5a48;
+        }
+
+        .channel-pill {
+          display: inline-grid;
+          grid-template-columns: auto auto;
+          gap: 6px;
+          align-items: center;
+          width: fit-content;
+          margin-top: 8px;
+          color: var(--secondary-text-color);
+        }
+
+        .channel-pill ha-icon {
+          --mdc-icon-size: 15px;
+          color: var(--primary-color);
+        }
+
+        .chart-panel {
+          position: relative;
+          box-sizing: border-box;
+          display: grid;
+          grid-template-rows: auto minmax(0, 1fr) auto;
+          gap: 10px;
+          height: 100%;
+          padding: 12px 12px 10px;
+          min-width: 0;
+          border: 1px solid var(--divider-color);
+          border-radius: 10px;
+          background: color-mix(in srgb, var(--primary-text-color) 5%, transparent);
+        }
+
+        .chart-visual {
+          position: relative;
+          display: flex;
+          align-items: stretch;
+          min-height: 0;
+          min-height: clamp(360px, 50vh, 560px);
+        }
+
+        .chart-panel .chart {
+          display: block;
+          flex: 1 1 auto;
+          width: 100%;
+          height: auto;
+          min-height: 100%;
+        }
+
+        .chart-visual[data-chart-visual] {
+          cursor: crosshair;
+        }
+
+        .chart-placeholder {
+          cursor: default;
+        }
+
+        .chart-placeholder .chart-empty {
+          flex: 1 1 auto;
+          margin-top: 0;
+          min-height: 0;
+        }
+
+        .chart-current-stat {
+          display: grid;
+          gap: 0;
+          text-align: right;
+          align-self: center;
+          white-space: nowrap;
+          cursor: pointer;
+        }
+
+        .chart-current-stat.floating {
+          position: absolute;
+          top: 10px;
+          right: 12px;
+          z-index: 1;
+          align-self: auto;
+        }
+
+        .chart-current-stat .label {
+          font-size: 11px;
+          letter-spacing: 0.04em;
+          text-transform: uppercase;
+        }
+
+        .chart-current-stat .value {
+          font-size: 32px;
+          font-weight: 700;
+          line-height: 1.05;
+          color: var(--primary-text-color);
+        }
+
+        .chart-axis-label {
+          fill: var(--secondary-text-color);
+          font-size: 16px;
+          font-weight: 650;
+        }
+
+        .chart-hover-guide {
+          stroke: color-mix(in srgb, var(--primary-color) 44%, transparent);
+          stroke-width: 1.5;
+          stroke-dasharray: 4 4;
+        }
+
+        .chart-hover-dot {
+          fill: var(--ha-card-background, var(--card-background-color));
+          stroke: var(--primary-color);
+          stroke-width: 3;
+        }
+
+        .chart-hover {
+          pointer-events: none;
+        }
+
+        .chart-hover[hidden] {
+          display: none;
+        }
+
+        .chart-tooltip-box {
+          fill: var(--ha-card-background, var(--card-background-color));
+          stroke: color-mix(in srgb, var(--primary-color) 34%, var(--divider-color));
+          stroke-width: 1;
+          filter: drop-shadow(0 8px 16px rgba(0, 0, 0, 0.24));
+        }
+
+        .chart-tooltip-value {
+          fill: var(--primary-text-color);
+          font-size: 17px;
+          font-weight: 700;
+        }
+
+        .chart-tooltip-time {
+          fill: var(--secondary-text-color);
+          font-size: 12px;
+          font-weight: 550;
+        }
+
+        .chart-header {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          gap: 10px;
+          align-items: center;
+        }
+
+        .chart-header-meta {
+          display: flex;
+          align-items: center;
+          justify-content: flex-end;
+          gap: 14px;
+          min-width: 0;
+        }
+
+        .chart-history-actions {
+          display: flex;
+          align-items: center;
+          justify-content: flex-end;
+          gap: 8px;
+        }
+
+        .chart-refresh-button {
+          width: 34px;
+          height: 34px;
+          flex: 0 0 34px;
+        }
+
+        .chart-refresh-button ha-icon {
+          --mdc-icon-size: 18px;
+        }
+
+        .history-scale-row {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: center;
+          gap: 8px;
+          margin-top: 0;
+        }
+
+        .history-scale-row .label {
+          margin-right: 2px;
+        }
+
+        .chart-actions {
+          display: flex;
+          flex-wrap: wrap;
+          justify-content: flex-end;
+          gap: 6px;
+        }
+
+        .history-scale-row .history-scale {
+          height: 34px;
+          min-width: 44px;
+          padding: 0 10px;
+        }
+
+        .history-scale-row .history-scale.selected {
+          color: var(--text-primary-color);
+          background: var(--primary-color);
+          border-color: var(--primary-color);
+        }
+
+        .watering-marker {
+          fill: #66c7ff;
+          opacity: 0.95;
+        }
+
+        .watering-marker-dot {
+          fill: #66c7ff;
+          opacity: 1;
+        }
+
+        .quick-actions {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+          gap: 10px;
+        }
+
+        .quick-actions button {
+          min-height: 52px;
+        }
+
+        .plant-actions {
+          align-content: start;
+        }
+
+        .plant-main .stats {
+          grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+        }
+
+        @media (min-width: 700px) {
+          .plant-dashboard {
+            grid-template-columns: minmax(0, 1fr) minmax(360px, 430px);
+            grid-template-areas:
+              "chart controls"
+              "chart actions";
+            gap: 16px;
+          }
+
+          .plant-side {
+            grid-area: chart;
+            height: 100%;
+          }
+
+          .plant-main {
+            grid-area: controls;
+            height: 100%;
+          }
+
+          .plant-main .stats {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+          }
+
+          .plant-actions {
+            grid-area: actions;
+          }
+
+          .quick-actions {
+            grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
+          }
+        }
+
+        @media (max-width: 520px) {
+          ha-card.detail-card {
+            width: 100%;
+            max-width: 100%;
+            margin-top: 12px;
+            margin-left: 0;
+            transform: none;
+            overflow: hidden;
+          }
+
+          .dashboard-toolbar,
+          .dashboard-grid {
+            grid-template-columns: 1fr;
+          }
+
+          .dashboard-toolbar {
+            top: 8px;
+            right: 18px;
+          }
+
+          .device-pill {
+            max-width: min(260px, calc(100vw - 48px));
+          }
+
+          .device-pill .name {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+          }
+
+          .device-menu {
+            max-width: calc(100vw - 48px);
+          }
+
+          .plant-main .stats,
+          .quick-actions,
+          .chart-header {
+            grid-template-columns: 1fr;
+          }
+
+          .chart-header-meta {
+            justify-content: space-between;
+            align-items: center;
+          }
+
+          .chart-current-stat {
+            text-align: left;
+          }
+
+          .chart-current-stat .value {
+            font-size: 28px;
+          }
+        }
+
+        .section-title {
+          margin: 4px 0 -4px;
+          font-size: 16px;
+          font-weight: 650;
+          color: var(--primary-text-color);
+        }
+
+        .grid {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 18px 20px;
+        }
+
+        .field {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          min-width: 0;
+        }
+
+        .field.wide {
+          grid-column: 1 / -1;
+        }
+
+        .field.time-field {
+          grid-column: 1 / -1;
+        }
+
+        input,
+        select {
+          width: 100%;
+          box-sizing: border-box;
+          margin-top: 0;
+          min-height: 38px;
+          border: 1px solid var(--divider-color);
+          border-radius: 8px;
+          padding: 9px 11px;
+          font: inherit;
+          color: var(--primary-text-color);
+          background: color-mix(in srgb, var(--primary-text-color) 6%, transparent);
+        }
+
+        input[type="number"] {
+          -moz-appearance: textfield;
+        }
+
+        input[type="number"]::-webkit-outer-spin-button,
+        input[type="number"]::-webkit-inner-spin-button {
+          -webkit-appearance: none;
+          margin: 0;
+        }
+
+        .time-pair {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 8px;
+          margin-top: 0;
+        }
+
+        .time-pair span {
+          display: block;
+          font-size: 11px;
+          line-height: 1.2;
+          color: var(--secondary-text-color);
+        }
+
+        .time-pair input {
+          margin-top: 4px;
+          text-align: center;
+        }
+
+        .action-strip {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) minmax(116px, auto) minmax(116px, auto);
+          gap: 12px;
+          align-items: end;
+        }
+
+        .dialog-backdrop {
+          position: fixed;
+          inset: 0;
+          z-index: 10;
+          display: grid;
+          place-items: center;
+          padding: 20px;
+          background: rgba(0, 0, 0, 0.54);
+        }
+
+        .dialog {
+          width: min(560px, 100%);
+          max-height: calc(100vh - 40px);
+          overflow: auto;
+          border-radius: 14px;
+          padding: 18px;
+          background: var(--ha-card-background, var(--card-background-color));
+          box-shadow: var(--ha-card-box-shadow, 0 12px 28px rgba(0, 0, 0, 0.3));
+        }
+
+        .edit-dialog {
+          width: min(420px, 100%);
+        }
+
+        .about-dialog {
+          width: min(760px, calc(100vw - 40px));
+          max-height: calc(100vh - 40px);
+          margin-top: 56px;
+          padding: 0;
+          overflow: hidden;
+        }
+
+        .about-dialog-body {
+          display: grid;
+          gap: 18px;
+          max-height: calc(100vh - 40px);
+          overflow: auto;
+          padding: 20px;
+        }
+
+        .about-dialog-header {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) 40px;
+          gap: 12px;
+          align-items: start;
+        }
+
+        .about-dialog-header .icon-button {
+          justify-self: end;
+        }
+
+        .dialog-title {
+          font-size: 19px;
+          font-weight: 650;
+          color: var(--primary-text-color);
+        }
+
+        .guide-dialog {
+          width: min(720px, 100%);
+        }
+
+        .guide-body {
+          display: grid;
+          gap: 14px;
+          margin-top: 14px;
+        }
+
+        .guide-image-wrap {
+          display: grid;
+          place-items: center;
+          min-height: 220px;
+          overflow: hidden;
+          border: 1px solid var(--divider-color);
+          border-radius: 10px;
+          background: #fff;
+        }
+
+        .guide-image {
+          display: block;
+          width: 100%;
+          height: auto;
+          max-height: min(54vh, 560px);
+          object-fit: contain;
+        }
+
+        .guide-copy {
+          display: grid;
+          gap: 4px;
+        }
+
+        .guide-step-title {
+          font-size: 16px;
+          font-weight: 650;
+          color: var(--primary-text-color);
+        }
+
+        .guide-step-text,
+        .guide-counter {
+          color: var(--secondary-text-color);
+        }
+
+        .guide-nav {
+          display: grid;
+          grid-template-columns: minmax(92px, auto) 1fr minmax(92px, auto);
+          gap: 10px;
+          align-items: center;
+        }
+
+        .guide-counter {
+          text-align: center;
+          font-size: 13px;
+        }
+
+        .guide-checkbox {
+          display: flex;
+          gap: 10px;
+          align-items: center;
+          color: var(--secondary-text-color);
+          cursor: pointer;
+        }
+
+        .guide-checkbox input {
+          width: 18px;
+          height: 18px;
+        }
+
+        .dialog-actions {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 10px;
+          margin-top: 16px;
+        }
+
+        .wizard-progress {
+          display: grid;
+          grid-template-columns: repeat(6, 1fr);
+          gap: 6px;
+          margin: 14px 0 16px;
+        }
+
+        .wizard-dot {
+          height: 4px;
+          border-radius: 999px;
+          background: color-mix(in srgb, var(--primary-text-color) 18%, transparent);
+        }
+
+        .wizard-dot.active {
+          background: var(--primary-color);
+        }
+
+        .wizard-step {
+          min-height: 0;
+        }
+
+        .profile-panel {
+          display: grid;
+          gap: 16px;
+        }
+
+        .profile-hero {
+          display: grid;
+          grid-template-columns: 132px minmax(0, 1fr);
+          gap: 16px;
+          align-items: center;
+        }
+
+        .profile-photo {
+          width: 132px;
+          height: 132px;
+          overflow: hidden;
+          border-radius: 12px;
+          background: color-mix(in srgb, var(--primary-color) 16%, transparent);
+          display: grid;
+          place-items: center;
+          color: var(--primary-color);
+        }
+
+        .profile-photo img {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+        }
+
+        .profile-about {
+          max-height: 260px;
+          overflow: auto;
+          padding: 14px;
+          border: 1px solid var(--divider-color);
+          border-radius: 8px;
+          color: var(--primary-text-color);
+          background: color-mix(in srgb, var(--primary-text-color) 5%, transparent);
+          line-height: 1.45;
+          white-space: pre-line;
+        }
+
+        .profile-stats {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 10px;
+        }
+
+        .channel-grid {
+          display: grid;
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+          gap: 10px;
+        }
+
+        .channel-choice {
+          min-height: 96px;
+          color: var(--primary-text-color);
+          background: color-mix(in srgb, var(--primary-text-color) 6%, transparent);
+          border: 1px solid var(--divider-color);
+        }
+
+        .channel-choice.active {
+          background: color-mix(in srgb, var(--primary-color) 18%, transparent);
+          border-color: var(--primary-color);
+        }
+
+        .mode-grid {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 12px;
+        }
+
+        .mode-choice {
+          min-height: 116px;
+          padding: 16px;
+          text-align: left;
+          color: var(--primary-text-color);
+          background: color-mix(in srgb, var(--primary-text-color) 6%, transparent);
+          border: 1px solid var(--divider-color);
+        }
+
+        .mode-choice.compact {
+          min-height: 52px;
+          text-align: center;
+        }
+
+        .mode-choice.active {
+          background: color-mix(in srgb, var(--primary-color) 18%, transparent);
+          border-color: var(--primary-color);
+        }
+
+        .mode-title {
+          font-size: 17px;
+          font-weight: 650;
+        }
+
+        .mode-text {
+          margin-top: 8px;
+          font-size: 13px;
+          line-height: 1.35;
+          color: var(--secondary-text-color);
+        }
+
+        .wizard-review {
+          display: grid;
+          grid-template-columns: 84px minmax(0, 1fr);
+          gap: 14px;
+          align-items: center;
+        }
+
+        @keyframes wizard-slide {
+          from {
+            opacity: 0;
+            transform: translateX(12px);
+          }
+          to {
+            opacity: 1;
+            transform: translateX(0);
+          }
+        }
+
+        .toast {
+          position: fixed;
+          left: 50%;
+          bottom: 24px;
+          z-index: 20;
+          transform: translateX(-50%);
+          max-width: min(420px, calc(100vw - 32px));
+          padding: 12px 16px;
+          border-radius: 999px;
+          color: var(--primary-text-color);
+          background: var(--ha-card-background, var(--card-background-color));
+          border: 1px solid var(--divider-color);
+          box-shadow: var(--ha-card-box-shadow, 0 12px 28px rgba(0, 0, 0, 0.3));
+        }
+
+        @media (max-width: 520px) {
+          .dialog-backdrop {
+            padding: 12px;
+          }
+
+          .about-dialog {
+            width: calc(100vw - 24px);
+            max-height: calc(100vh - 24px);
+            margin-top: 32px;
+          }
+
+          .about-dialog-body {
+            max-height: calc(100vh - 24px);
+            padding: 16px;
+          }
+
+          .stats,
+          .overview-grid,
+          .compact-row,
+          .choice-row,
+          .reservoir-grid,
+          .channel-grid,
+          .mode-grid,
+          .grid,
+          .profile-hero,
+          .profile-stats,
+          .quick-actions,
+          .actions,
+          .action-strip {
+            grid-template-columns: 1fr;
+          }
+
+          .profile-photo {
+            width: min(160px, 100%);
+            height: auto;
+            aspect-ratio: 1;
+          }
+        }
       </style>
-      ${dashboard ? this._dashboardTemplate() : detail ? this._detailTemplate() : this._legacyTemplate()}
+
+      <ha-card class="${detail ? "detail-card" : dashboard ? "dashboard-host-card" : ""}">
+        ${renderLegacyAsPlants ? this._plantsTemplate() : overview ? this._overviewTemplate({ entities, overview }) : detail ? this._detailTemplate({
+          deviceRecord,
+          entities,
+          plantConfigured,
+          mode,
+          next,
+          moisture,
+          manualDuration,
+          firstWatering,
+          firstWateringHour,
+          firstWateringMinute,
+          scheduleDuration,
+          interval,
+          smartMinMoisture,
+          smartMaxMoisture,
+          smartRange,
+          smartDaytimeWatering,
+          problems,
+        }) : this._summaryTemplate({ entities, plantConfigured, mode, next, moisture, manualDuration, smartRange, problems })}
+      </ha-card>
+
+      ${this._reservoirGuideOpen ? this._reservoirGuideTemplate() : ""}
+      ${this._reservoirOpen ? this._reservoirDialogTemplate() : ""}
+      ${this._editDialog ? this._editDialogTemplate() : ""}
+      ${this._plantWizardOpen ? this._plantWizardDialogTemplate() : ""}
+      ${this._modeWizardOpen ? this._modeWizardDialogTemplate() : ""}
+      ${this._deletePlantDialogOpen ? this._deletePlantDialogTemplate() : ""}
+      ${this._toast ? `<div class="toast">${this._escape(this._toast)}</div>` : ""}
     `;
-    this._wire();
+
+    this._bindEvents();
+    this._mountHistoryGraph(entities);
+    if (detail) {
+      this._loadCubeHistoryApiIfNeeded();
+    } else {
+      this._loadGraphHistory();
+    }
   }
 
-  _dashboardTemplate() {
-    const device = this._entities("a");
-    const connected = !this._isOn(device.connection_problem);
+  _overviewTemplate({ entities, overview }) {
+    if (overview === "dashboard") {
+      return this._dashboardTemplate({ entities });
+    }
+    if (overview === "tank") {
+      return this._tankTemplate({ entities });
+    }
+    if (overview === "plants") {
+      return this._plantsTemplate();
+    }
+    if (overview === "activity") {
+      return this._activityOverviewTemplate();
+    }
+    return this._statusTemplate({ entities });
+  }
+
+  _channels() {
+    return ["a", "b", "c", "d"];
+  }
+
+  _channelName(channel) {
+    return channel.toUpperCase();
+  }
+
+  _configuredChannels() {
+    return this._channels()
+      .map((channel) => ({
+        channel,
+        entities: this._entities(channel),
+      }))
+      .filter((item) => this._isPlantConfigured(item.entities, false));
+  }
+
+  _configuredChannelsForDevice(device) {
+    return this._channels()
+      .map((channel) => ({
+        channel,
+        deviceId: device.device_id,
+        deviceName: device.name || device.device_id,
+        entities: {
+          ...(device.entities || {}),
+          ...(device.channels?.[channel] || {}),
+        },
+      }))
+      .filter((item) => this._isPlantConfigured(item.entities, false));
+  }
+
+  _dashboardTemplate({ entities }) {
+    const device = this._deviceRecord();
+    const hasDeviceSwitcher = this._deviceRecords().length > 1;
     return `
-      <ha-card class="flat">
-        <div class="dashboard">
-          <div class="column">
-            <div class="card">
-              <div class="header">
-                <div class="plant-icon"><ha-icon icon="mdi:cube-outline"></ha-icon></div>
-                <div>
-                  <div class="title">GrowCube</div>
-                  <div class="subtitle">${connected ? "Connected" : "Disconnected"}</div>
-                </div>
-                <div class="status"><span class="dot ${connected ? "" : "off"}"></span><span>${connected ? "Online" : "Offline"}</span></div>
-              </div>
-              <div class="stats">
-                ${this._stat("Temperature", device.temperature)}
-                ${this._stat("Humidity", device.humidity)}
-                ${this._stat("Tank level", device.tank_level)}
-                ${this._stat("Days left", device.tank_days_left)}
-              </div>
-              <div class="meter"><div class="meter-track"><div class="meter-fill" style="width:${this._numberState(device.tank_level)}%"></div></div></div>
-            </div>
-            <div class="card">
-              <div class="title">Plants</div>
-              <div class="plants-list">${["a","b","c","d"].map((c) => this._plantRow(c)).join("")}</div>
-            </div>
+      <div class="dashboard-card ${hasDeviceSwitcher ? "has-device-switcher" : ""}">
+        <div class="dashboard-toolbar">
+          ${this._globalDeviceSwitcherTemplate(device?.device_id)}
+        </div>
+        <div class="dashboard-grid">
+          <div class="dashboard-column">
+            ${this._plantsTemplate()}
+            ${this._statusTemplate({ entities })}
           </div>
-          <div class="column">
-            <div class="card">
-              <div class="title">Controls</div>
-              <div class="plants-list">${["a","b","c","d"].map((c) => this._controlRow(c)).join("")}</div>
-            </div>
-            <div class="activity-panel">
-              <div class="title">Activity</div>
-              ${this._activityTemplate()}
-            </div>
+          <div class="dashboard-column">
+            ${this._tankTemplate({ entities })}
+            ${this._activityOverviewTemplate()}
           </div>
         </div>
-      </ha-card>
+      </div>
     `;
   }
 
-  _detailTemplate() {
-    const c = this._channelKey();
-    const e = this._entities(c);
-    const problems = this._problems(e);
+  _globalDeviceSwitcherTemplate(selectedDeviceId = this._selectedDeviceId()) {
+    const devices = this._deviceRecords();
+    if (devices.length <= 1) {
+      return "";
+    }
+    const selected = devices.find((device) => device.device_id === selectedDeviceId) || devices[0];
     return `
-      <ha-card class="flat">
-        <div class="detail">
-          <div class="card">
-            <div class="header">
-              ${this._photoTemplate(c)}
-              <div>
-                <div class="title">${this._escape(this._plantName(c))}</div>
-                <div class="subtitle">Channel ${c.toUpperCase()} · ${this._entityState(e.mode, "Disabled")}</div>
-              </div>
-              <div class="value big">${this._display(e.moisture, "--")}</div>
-            </div>
-            ${problems.map((item) => `<div class="problem">${this._escape(item)}</div>`).join("")}
-            <div class="actions">
-              <button data-action="water" ${this._state(e.water) ? "" : "disabled"}>Water</button>
-              <button class="secondary" data-action="stop" ${this._state(e.stop) ? "" : "disabled"}>Stop</button>
-              <button class="secondary" data-action="history" ${this._state(e.load_history) ? "" : "disabled"}>History</button>
-            </div>
+      <div class="global-device-switcher">
+        <button type="button" class="device-pill" data-action="toggle-device-menu" aria-label="Select GrowCube device" aria-expanded="${this._deviceMenuOpen ? "true" : "false"}">
+          <ha-icon icon="mdi:cube-outline"></ha-icon>
+          <span class="name">${this._escape(selected?.name || selected?.device_id || "GrowCube")}</span>
+          <ha-icon icon="${this._deviceMenuOpen ? "mdi:chevron-up" : "mdi:chevron-down"}"></ha-icon>
+        </button>
+        ${this._deviceMenuOpen ? `
+          <div class="device-menu" role="menu">
+            ${devices.map((device) => {
+              const active = device.device_id === selectedDeviceId;
+              return `
+                <button type="button" class="${active ? "active" : ""}" data-action="select-device" data-device-id="${this._escape(device.device_id)}" role="menuitem">
+                  <span class="check">${active ? '<ha-icon icon="mdi:check"></ha-icon>' : ""}</span>
+                  <span class="name">${this._escape(device.name || device.device_id)}</span>
+                </button>
+              `;
+            }).join("")}
           </div>
-          <div class="detail-grid">
-            <div class="card">
-              <div class="title">Watering</div>
-              <div class="stats">
-                ${this._stat("Mode", e.mode)}
-                ${this._stat("Next", e.next_watering)}
-                ${this._stat("Last", e.last_watering)}
-                ${this._stat("History", e.history_count)}
-              </div>
-            </div>
-            <div class="card">
-              <div class="title">Environment</div>
-              <div class="stats">
-                ${this._stat("Temperature", e.temperature)}
-                ${this._stat("Humidity", e.humidity)}
-                ${this._stat("Tank", e.tank_level)}
-                ${this._stat("Water warning", e.water_warning)}
-              </div>
-            </div>
+        ` : ""}
+      </div>
+    `;
+  }
+
+  _firstAvailableChannel() {
+    return this._channels().find((channel) => !this._isPlantConfigured(this._entities(channel), false)) || "a";
+  }
+
+  _plantsTemplate() {
+    const device = this._deviceRecord();
+    const plants = device ? this._configuredChannelsForDevice(device) : [];
+    const hasFreeChannel = plants.length < this._channels().length;
+    return `
+      <div class="card">
+        <div class="header">
+          <div class="plant-icon"><ha-icon icon="mdi:sprout"></ha-icon></div>
+          <div>
+            <div class="title">Plants</div>
+            <div class="subtitle">${this._escape(device?.name || "GrowCube")} · ${plants.length ? `${plants.length} active plant${plants.length === 1 ? "" : "s"}` : "No plants added yet"}</div>
           </div>
         </div>
-      </ha-card>
+        ${
+          plants.length
+            ? `<div class="plants-list">${plants.map((plant) => this._plantRowTemplate(plant)).join("")}</div>`
+            : `<button type="button" class="wide-button" data-action="open-add-plant">Add plant</button>`
+        }
+        ${plants.length && hasFreeChannel ? '<button type="button" class="wide-button secondary" data-action="open-add-plant">Add another plant</button>' : ""}
+      </div>
     `;
   }
 
-  _legacyTemplate() {
-    return this._dashboardTemplate();
-  }
-
-  _plantRow(channel) {
-    const e = this._entities(channel);
-    const configured = this._isConfigured(channel);
+  _plantRowTemplate({ channel, entities, deviceId = "" }) {
+    const photoUrl = this._entityState(entities.photo_url, "");
+    const name = this._entityDisplay(entities.name, this._channelName(channel));
+    const moisture = this._entityDisplay(entities.moisture, "Unknown");
+    const mode = this._normalizeMode(this._entityState(entities.mode, "Disabled"));
     return `
-      <div class="plant-row" data-channel="${channel}">
-        ${this._photoTemplate(channel)}
-        <div>
-          <div class="title">${configured ? this._escape(this._plantName(channel)) : "No plant added"}</div>
-          <div class="subtitle">Channel ${channel.toUpperCase()} · ${this._entityState(e.mode, "Disabled")}</div>
+      <div class="plant-row" data-action="navigate-channel" data-channel="${this._escape(channel)}" data-device-id="${this._escape(deviceId)}" role="button" tabindex="0">
+        <div class="plant-photo">
+          ${photoUrl ? `<img src="${this._escape(photoUrl)}" alt="">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
+        </div>
+        <div class="plant-meta">
+          <div class="title">${this._escape(name)}</div>
+          <div class="subtitle">${this._escape(this._channelName(channel))} · ${this._escape(this._modeDisplay(mode))}</div>
         </div>
         <div class="plant-stats">
-          <div class="value">${this._display(e.moisture, "--")}</div>
-          <div class="label">${this._isOn(e.pump) ? "Watering" : "Idle"}</div>
+          <div class="label">Moisture</div>
+          <div class="value">${this._escape(moisture)}</div>
         </div>
       </div>
     `;
   }
 
-  _controlRow(channel) {
-    const e = this._entities(channel);
+  _statusTemplate({ entities }) {
+    const device = this._deviceRecord();
+    const deviceEntities = device?.entities || entities;
+    const tankRemaining = this._entityDisplay(deviceEntities.tank_remaining, "Unknown");
+    const tankDaysLeft = this._entityDisplay(deviceEntities.tank_days_left, "Unknown");
     return `
-      <div class="plant-row">
-        <div class="plant-icon"><ha-icon icon="mdi:sprout"></ha-icon></div>
-        <div>
-          <div class="title">${this._escape(this._plantName(channel))}</div>
-          <div class="subtitle">${this._display(e.moisture, "--")} · ${this._entityState(e.mode, "Disabled")}</div>
+      <div class="card">
+        <div class="header">
+          <div class="plant-icon"><ha-icon icon="mdi:cube-outline"></ha-icon></div>
+          <div>
+            <div class="title">Status</div>
+            <div class="subtitle">Tank and room status</div>
+          </div>
         </div>
-        <div class="actions">
-          <button data-button="${e.water}" ${this._state(e.water) ? "" : "disabled"}>Water</button>
-          <button class="secondary" data-button="${e.stop}" ${this._state(e.stop) ? "" : "disabled"}>Stop</button>
+        <div class="overview-grid">
+          <div class="stat" data-action="more-info" data-entity="${this._escape(deviceEntities.temperature)}" role="button" tabindex="0">
+            <div class="label">Temperature</div>
+            <div class="value">${this._escape(this._entityDisplay(deviceEntities.temperature, "Unknown"))}</div>
+          </div>
+          <div class="stat" data-action="more-info" data-entity="${this._escape(deviceEntities.humidity)}" role="button" tabindex="0">
+            <div class="label">Humidity</div>
+            <div class="value">${this._escape(this._entityDisplay(deviceEntities.humidity, "Unknown"))}</div>
+          </div>
+          <div class="stat">
+            <div class="label">Tank</div>
+            <div class="value">${this._escape(tankRemaining)}</div>
+          </div>
+          <div class="stat">
+            <div class="label">Days left</div>
+            <div class="value">${this._escape(tankDaysLeft)}</div>
+          </div>
         </div>
       </div>
     `;
   }
 
-  _activityTemplate() {
-    const rows = [];
-    for (const c of ["a", "b", "c", "d"]) {
-      const e = this._entities(c);
-      this._problems(e).forEach((problem) => rows.push({ title: problem, detail: `Channel ${c.toUpperCase()}`, problem: true }));
-      const last = this._entityState(e.last_watering, "");
-      if (last) rows.push({ title: "Last watering", detail: `Channel ${c.toUpperCase()}`, time: last });
-    }
-    if (!rows.length) {
-      return '<div class="activity-empty">No watering or active errors yet</div>';
-    }
-    return rows.slice(0, 6).map((row) => `
-      <div class="activity-row ${row.problem ? "problem" : ""}">
-        <div><div class="activity-title">${this._escape(row.title)}</div><div class="subtitle">${this._escape(row.detail)}</div></div>
-        <div class="subtitle">${this._escape(this._shortTime(row.time || ""))}</div>
+  _activityOverviewTemplate() {
+    const device = this._deviceRecord();
+    return `
+      <div class="card">
+        <div class="header">
+          <div class="plant-icon"><ha-icon icon="mdi:message-alert-outline"></ha-icon></div>
+          <div>
+            <div class="title">Recent activity</div>
+            <div class="subtitle">Watering history and alerts</div>
+          </div>
+          <div class="header-side">
+            <button type="button" class="icon-button" data-action="refresh-activity" aria-label="Refresh watering history">
+              <ha-icon icon="mdi:refresh"></ha-icon>
+            </button>
+          </div>
+        </div>
+        ${this._activityFeedTemplate()}
       </div>
-    `).join("");
+    `;
   }
 
-  _stat(label, entityId) {
-    return `<div class="stat" data-info="${entityId || ""}"><div class="label">${this._escape(label)}</div><div class="value">${this._escape(this._display(entityId))}</div></div>`;
+  async _refreshAllHistory() {
+    const requests = this._channels()
+      .map((channel) => this._entities(channel))
+      .filter((entities) => entities.load_history)
+      .map((entities) => {
+        if (entities.history_count) {
+          delete this._cubeHistoryRequestedAt[entities.history_count];
+        }
+        return this._press(entities.load_history);
+      });
+    if (!requests.length) {
+      this._showError("History controls are unavailable");
+      return;
+    }
+    this._cubeHistory = {};
+    this._cubeHistoryLoadedAt = {};
+    try {
+      await Promise.allSettled(requests);
+      this._showToast("Refreshing watering history");
+    } catch (error) {
+      this._showError("Could not refresh history");
+    }
   }
 
-  _photoTemplate(channel) {
-    const url = this._plantPhoto(channel);
-    return `<div class="photo">${url ? `<img src="${this._escape(url)}" alt="">` : '<ha-icon icon="mdi:flower"></ha-icon>'}</div>`;
+  _tankTemplate({ entities }) {
+    const device = this._deviceRecord();
+    const deviceEntities = device?.entities || entities;
+    const growcubeCapacity = 1500;
+    const tankLevelText = this._entityDisplay(deviceEntities.tank_level, "Unknown");
+    const tankLevel = this._clamp(this._number(deviceEntities.tank_level, 0), 0, 100);
+    const tankCapacity = this._number(deviceEntities.tank_capacity, 1500);
+    const customCapacity = tankCapacity !== growcubeCapacity;
+    return `
+      <div class="card">
+        <div class="header">
+          <div class="plant-icon"><ha-icon icon="mdi:water-pump"></ha-icon></div>
+          <div>
+            <div class="title">Tank</div>
+            <div class="subtitle">Reservoir and fill status</div>
+          </div>
+        </div>
+        <div class="tank-meter stat" data-action="more-info" data-entity="${this._escape(deviceEntities.tank_level)}" role="button" tabindex="0">
+          <div class="label">Tank level ${this._escape(tankLevelText)} of ${tankCapacity} mL</div>
+          <div class="meter-track"><div class="meter-fill" style="width: ${tankLevel}%"></div></div>
+        </div>
+        ${this._problemBannerTemplate(this._problemItems({ ...deviceEntities, ...(device?.channels?.[this._channelKey()] || {}) }))}
+        <div class="tank-tools">
+          <div class="tool-panel">
+            <div class="tool-title">Reservoir</div>
+            <div class="reservoir-grid">
+              <button type="button" class="state-button reservoir-choice ${customCapacity ? "" : "active"}" data-action="set-reservoir-capacity" data-entity="${this._escape(deviceEntities.tank_capacity)}" data-capacity="${growcubeCapacity}">
+                <span class="choice-title">GrowCube</span>
+                <span class="choice-meta">${growcubeCapacity} mL</span>
+              </button>
+              <button type="button" class="state-button reservoir-choice ${customCapacity ? "active" : ""}" data-action="custom-capacity" data-entity="${this._escape(deviceEntities.tank_capacity)}" data-current-capacity="${tankCapacity}">
+                <span class="choice-title">Custom</span>
+                <span class="choice-meta">${customCapacity ? `${tankCapacity} mL` : "Set any size"}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+        <button type="button" class="wide-button" data-action="mark-tank-full" data-entity="${this._escape(deviceEntities.mark_tank_full)}">Mark tank full</button>
+      </div>
+    `;
   }
 
-  _numberState(entityId) {
-    const value = Number(this._state(entityId)?.state);
-    if (!Number.isFinite(value)) return 0;
-    return Math.max(0, Math.min(100, value));
+  _graphTemplate({ entities }) {
+    const title = this._config.name || `${this._plantName()} moisture`;
+    if (!this._isPlantConfigured(entities)) {
+      return `
+        <ha-card>
+          <div class="card">
+            <div class="header">
+              <div class="plant-icon"><ha-icon icon="mdi:pot-mix-outline"></ha-icon></div>
+              <div>
+                <div class="title">${this._escape(this._config.name || this._channelLabel())}</div>
+                <div class="subtitle">Add a plant to show moisture history</div>
+              </div>
+            </div>
+          </div>
+        </ha-card>
+      `;
+    }
+    if (!entities.moisture) {
+      return `
+        <ha-card>
+          <div class="card">
+            <div class="header">
+              <div class="plant-icon"><ha-icon icon="mdi:chart-bell-curve"></ha-icon></div>
+              <div>
+                <div class="title">${this._escape(title)}</div>
+                <div class="subtitle">Moisture entity not found</div>
+              </div>
+            </div>
+          </div>
+        </ha-card>
+      `;
+    }
+    return `
+      <div
+        class="native-history-graph"
+        data-native-history-graph
+        data-entity="${this._escape(entities.moisture)}"
+        data-title="${this._escape(title)}"
+      ></div>
+    `;
   }
 
-  _shortTime(value) {
-    if (!value) return "";
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return value;
-    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  _mountHistoryGraph(entities) {
+    if (!this._config.graph || !entities.moisture) {
+      return;
+    }
+    const host = this.shadowRoot.querySelector("[data-native-history-graph]");
+    if (!host) {
+      return;
+    }
+    const mount = async () => {
+      if (!this.shadowRoot.contains(host)) {
+        return;
+      }
+      const cardConfig = {
+        type: "history-graph",
+        title: host.dataset.title || this._config.name || `${this._plantName()} moisture`,
+        hours_to_show: this._clamp(Number(this._config.hours_to_show) || 24, 1, 168),
+        entities: [
+          {
+            entity: entities.moisture,
+            name: "Moisture",
+          },
+        ],
+      };
+
+      let card;
+      try {
+        if (window.loadCardHelpers) {
+          const helpers = await window.loadCardHelpers();
+          card = helpers.createCardElement(cardConfig);
+        } else {
+          card = document.createElement("hui-history-graph-card");
+          card.setConfig(cardConfig);
+        }
+      } catch (error) {
+        host.innerHTML = `
+          <ha-card>
+            <div class="card">
+              <div class="chart-empty">History graph unavailable</div>
+            </div>
+          </ha-card>
+        `;
+        return;
+      }
+      card.hass = this._hass;
+      host.replaceChildren(card);
+    };
+
+    mount();
   }
 
-  _wire() {
-    this.shadowRoot.querySelectorAll("[data-channel]").forEach((element) => {
-      element.addEventListener("click", () => this._navigate(element.dataset.channel));
+  _summaryTemplate({ entities, plantConfigured, mode, next, moisture, manualDuration, smartRange, problems }) {
+    if (!plantConfigured) {
+      return this._emptyChannelTemplate({ entities });
+    }
+    const problemBanner = this._problemBannerTemplate(problems);
+    const blocked = this._wateringBlocked(problems);
+    const automaticLabel = mode === "Smart" ? "Moisture range" : "Next watering";
+    const automaticValue = mode === "Smart" ? smartRange : next;
+    return `
+      <div class="card summary" data-action="navigate">
+        <div class="header">
+          <div class="plant-icon"><ha-icon icon="mdi:flower"></ha-icon></div>
+          <div>
+            <div class="title">${this._escape(this._plantName())}</div>
+            <div class="subtitle">${this._escape(this._config.channel || this._channelLabel())}</div>
+          </div>
+          <ha-icon icon="mdi:chevron-right"></ha-icon>
+        </div>
+        <div class="stats">
+          <div class="stat">
+            <div class="label">Moisture</div>
+            <div class="value">${this._escape(moisture)}</div>
+          </div>
+          <div class="stat">
+            <div class="label">${this._escape(automaticLabel)}</div>
+            <div class="value">${this._escape(automaticValue)}</div>
+          </div>
+        </div>
+        ${problemBanner}
+        <div class="actions">
+          <button type="button" data-action="water" ${blocked ? "disabled" : ""}>Water ${manualDuration} mL</button>
+          <button type="button" class="danger" data-action="stop">Stop</button>
+        </div>
+      </div>
+    `;
+  }
+
+  _detailTemplate(data) {
+    if (!data.plantConfigured) {
+      return this._plantSetupTemplate(data);
+    }
+    const profile = this._profileMetadata(data.entities);
+    const showNextWatering = data.mode === "Repeating";
+    const nextLabel = "Next watering";
+    const nextValue = data.next;
+    const modeLabel = "Mode";
+    const modeAction = "edit-mode";
+    const modeValue = this._modeDisplay(data.mode);
+    const rangeLabel = "Moisture range";
+    const rangeAction = "edit-smart-range";
+    const rangeValue = data.smartRange;
+    const secondaryLabel = data.mode === "Smart" ? "Daytime watering" : "Schedule";
+    const secondaryAction = data.mode === "Smart" ? "edit-daytime" : "edit-repeating-schedule";
+    const secondaryValue = data.mode === "Smart"
+      ? (data.smartDaytimeWatering ? "On" : "Off")
+      : `${data.scheduleDuration} mL / ${Math.max(1, Math.round(data.interval / 24))}d`;
+    return `
+      <div class="card detail detail-flat">
+        <div class="plant-dashboard">
+          <div class="plant-main plant-section">
+            <div class="plant-titlebar">
+              <div>
+                <div class="title" data-action="edit-plant-name" role="button" tabindex="0">${this._escape(this._plantName())}</div>
+                <div class="channel-pill"><ha-icon icon="mdi:checkbox-blank-circle-outline"></ha-icon><span>${this._escape(this._config.channel || this._channelLabel())}</span></div>
+              </div>
+              <div class="plant-menu-anchor">
+                <button type="button" class="icon-button" data-action="toggle-detail-menu" aria-label="Plant menu" aria-expanded="${this._detailMenuOpen ? "true" : "false"}">
+                  <ha-icon icon="mdi:dots-vertical"></ha-icon>
+                </button>
+                ${this._detailMenuOpen ? `
+                  <div class="detail-menu">
+                    <button type="button" data-action="open-about"><ha-icon icon="mdi:information-outline"></ha-icon><span>About</span></button>
+                    ${data.entities.reset ? '<button type="button" class="danger" data-action="delete-plant"><ha-icon icon="mdi:delete-outline"></ha-icon><span>Delete plant</span></button>' : ""}
+                  </div>
+                ` : ""}
+              </div>
+            </div>
+            <div class="stats">
+              ${showNextWatering ? `
+                <div class="stat" data-action="edit-first-watering" role="button" tabindex="0">
+                  <div class="label">${this._escape(nextLabel)}</div>
+                  <div class="value">${this._escape(nextValue)}</div>
+                </div>
+              ` : ""}
+              <div class="stat" data-action="${this._escape(modeAction)}" role="button" tabindex="0">
+                <div class="label">${this._escape(modeLabel)}</div>
+                <div class="value">${this._escape(modeValue)}</div>
+              </div>
+              <div class="stat" data-action="${this._escape(rangeAction)}" role="button" tabindex="0">
+                <div class="label">${this._escape(rangeLabel)}</div>
+                <div class="value">${this._escape(rangeValue)}</div>
+              </div>
+              <div class="stat" data-action="${this._escape(secondaryAction)}" role="button" tabindex="0">
+                <div class="label">${this._escape(secondaryLabel)}</div>
+                <div class="value">${this._escape(secondaryValue)}</div>
+              </div>
+              <div class="stat" data-action="edit-manual-amount" role="button" tabindex="0">
+                <div class="label">Manual amount</div>
+                <div class="value">${this._escape(data.manualDuration)} mL</div>
+              </div>
+            </div>
+            ${this._problemBannerTemplate(data.problems)}
+          </div>
+          <div class="plant-actions plant-section">
+            <div class="section-title">Actions</div>
+            <div class="quick-actions">
+              <button type="button" data-action="water" ${this._wateringBlocked(data.problems) ? "disabled" : ""}>Water</button>
+              <button type="button" class="danger" data-action="stop">Stop</button>
+            </div>
+          </div>
+          <div class="plant-side">
+            ${this._detailChartTemplate(data)}
+          </div>
+        </div>
+      </div>
+      ${this._aboutDialogOpen ? this._aboutDialogTemplate(data, profile) : ""}
+    `;
+  }
+
+  _aboutDialogTemplate(data, profile) {
+    const aboutText = profile.description || (this._aboutProfileLoading ? "Loading plant information..." : "No plant information is available for this profile yet.");
+    const category = profile.category || "Plant profile";
+    const photoUrl = this._entityState(data.entities.photo_url, "");
+    const statCards = [
+      this._profileStatTemplate("Soil moisture", this._rangeText(data.smartMinMoisture, data.smartMaxMoisture, "%")),
+      this._hasRange(profile.tempMin, profile.tempMax)
+        ? this._profileStatTemplate("Temperature", this._rangeText(profile.tempMin, profile.tempMax, "°C"))
+        : "",
+      this._hasRange(profile.airHumidityMin, profile.airHumidityMax)
+        ? this._profileStatTemplate("Air humidity", this._rangeText(profile.airHumidityMin, profile.airHumidityMax, "%"))
+        : "",
+    ].filter(Boolean).join("");
+    return `
+      <div class="dialog-backdrop" data-action="close-about-dialog">
+        <div class="dialog about-dialog" role="dialog" aria-modal="true" aria-label="About this plant">
+          <div class="about-dialog-body">
+            <div class="about-dialog-header">
+              <div>
+                <div class="dialog-title">About this plant</div>
+                <div class="subtitle">${this._escape(this._config.channel || this._channelLabel())}</div>
+              </div>
+              <button type="button" class="icon-button" data-action="close-about-button" aria-label="Close about">
+                <ha-icon icon="mdi:close"></ha-icon>
+              </button>
+            </div>
+            <div class="profile-panel">
+              <div class="profile-hero">
+                <div class="profile-photo">
+                  ${photoUrl ? `<img src="${this._escape(photoUrl)}" alt="">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
+                </div>
+                <div>
+                  <div class="title">${this._escape(this._plantName())}</div>
+                  <div class="subtitle">${this._escape(category)}</div>
+                </div>
+              </div>
+              ${statCards ? `<div class="profile-stats">${statCards}</div>` : ""}
+              <div>
+                <div class="section-title">About</div>
+                <div class="profile-about">${this._escape(aboutText)}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  _detailChartMetricTemplate(entities, moisture, floating = false) {
+    if (!entities?.moisture) {
+      return "";
+    }
+    return `
+      <div class="chart-current-stat${floating ? " floating" : ""}" data-action="more-info" data-entity="${this._escape(entities.moisture)}" role="button" tabindex="0">
+        <div class="label">Moisture</div>
+        <div class="value">${this._escape(moisture)}</div>
+      </div>
+    `;
+  }
+
+  _detailChartHeaderTemplate(historyHours, entities, moisture, includeMetric = true) {
+    return `
+      <div class="chart-header">
+        <div class="section-title">Moisture history</div>
+        <div class="chart-header-meta">
+          ${includeMetric ? this._detailChartMetricTemplate(entities, moisture) : ""}
+          <div class="chart-history-actions">
+            <button type="button" class="icon-button chart-refresh-button" data-action="refresh-current-history" aria-label="Refresh moisture history">
+              <ha-icon icon="mdi:refresh"></ha-icon>
+            </button>
+            ${this._historyScaleRowTemplate(historyHours)}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  _historyTimeTemplate(timestamp, align = "start") {
+    if (!Number.isFinite(timestamp)) {
+      return `<div class="chart-time${align === "end" ? " end" : ""}"></div>`;
+    }
+    const date = new Date(timestamp);
+    const timeText = date.toLocaleTimeString(undefined, {
+      hour: "2-digit",
+      minute: "2-digit",
     });
-    this.shadowRoot.querySelectorAll("[data-button]").forEach((element) => {
+    const dateText = date.toLocaleDateString(undefined, {
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+    });
+    return `
+      <div class="chart-time${align === "end" ? " end" : ""}">
+        <span class="chart-time-primary">${this._escape(timeText)}</span>
+        <span class="chart-time-secondary">${this._escape(dateText)}</span>
+      </div>
+    `;
+  }
+
+  _detailChartTemplate(data) {
+    const { entities, moisture } = data;
+    const width = 520;
+    const height = 280;
+    const padding = 20;
+    const leftPadding = 52;
+    const historyHours = this._historyHours();
+    const historyState = this._detailHistoryState(entities);
+    const visibleHistoryPoints = this._detailHistoryPoints(entities, historyHours);
+    const wateringEvents = this._detailWateringEvents(entities);
+    const windowEnd = Date.now();
+    const windowStart = windowEnd - historyHours * 60 * 60 * 1000;
+    if (historyState?.attributes?.history_loading) {
+      return `
+        <div class="chart-panel">
+          ${this._detailChartHeaderTemplate(historyHours, entities, moisture, false)}
+          <div class="chart-visual chart-placeholder">
+            ${this._detailChartMetricTemplate(entities, moisture, true)}
+            <div class="chart-empty">Loading history...</div>
+          </div>
+        </div>
+      `;
+    }
+    if (!visibleHistoryPoints.length) {
+      return `
+        <div class="chart-panel">
+          ${this._detailChartHeaderTemplate(historyHours, entities, moisture, false)}
+          <div class="chart-visual chart-placeholder">
+            ${this._detailChartMetricTemplate(entities, moisture, true)}
+            <div class="chart-empty">${this._historyEmptyText(historyState, historyHours)}</div>
+          </div>
+        </div>
+      `;
+    }
+    const points = this._extendFreshHistoryToNow(
+      this._smoothGraphPoints(visibleHistoryPoints),
+      windowEnd,
+    );
+    const coords = this._graphCoordinates(points, width, height, padding, leftPadding, windowStart, windowEnd);
+    const minRange = this._clamp(Number(data.smartMinMoisture), 0, 100);
+    const maxRange = this._clamp(Number(data.smartMaxMoisture), 0, 100);
+    const rangeLineFor = (value, label, offset = -4) => {
+      const y = padding + (1 - value / 100) * (height - padding * 2);
+      return `
+        <line class="chart-range-line" x1="${leftPadding}" y1="${y}" x2="${width - padding}" y2="${y}"></line>
+        <text class="chart-range-label" x="${width - padding - 42}" y="${y + offset}">${label} ${value}%</text>
+      `;
+    };
+    const rangeLines = [
+      rangeLineFor(maxRange, "Max", maxRange - minRange < 8 ? -8 : -4),
+      rangeLineFor(minRange, "Min", maxRange - minRange < 8 ? 14 : 14),
+    ].join("");
+    const chartPoints = this._escape(JSON.stringify(coords.map((point) => ({
+      t: point.t,
+      v: Math.round(point.v),
+      x: Math.round(point.x * 10) / 10,
+      y: Math.round(point.y * 10) / 10,
+    }))));
+    const path = this._graphPath(points, width, height, padding, leftPadding, windowStart, windowEnd);
+    const firstCoord = coords[0];
+    const lastCoord = coords[coords.length - 1];
+    const areaPath = path && firstCoord && lastCoord
+      ? `M ${firstCoord.x} ${height - padding} ${path} L ${lastCoord.x} ${height - padding} Z`
+      : "";
+    return `
+      <div class="chart-panel">
+        ${this._detailChartHeaderTemplate(historyHours, entities, moisture, false)}
+        <div class="chart-visual" data-chart-visual>
+          ${this._detailChartMetricTemplate(entities, moisture, true)}
+          <svg class="chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Moisture history" data-chart-svg data-chart-points="${chartPoints}">
+            <text class="chart-axis-label" x="6" y="${padding + 5}">100%</text>
+            <text class="chart-axis-label" x="14" y="${padding + (height - padding * 2) * 0.25 + 5}">75%</text>
+            <text class="chart-axis-label" x="14" y="${height / 2 + 5}">50%</text>
+            <text class="chart-axis-label" x="14" y="${padding + (height - padding * 2) * 0.75 + 5}">25%</text>
+            <text class="chart-axis-label" x="27" y="${height - padding + 5}">0%</text>
+            <line class="chart-grid" x1="${leftPadding}" y1="${padding}" x2="${width - padding}" y2="${padding}"></line>
+            <line class="chart-grid" x1="${leftPadding}" y1="${padding + (height - padding * 2) * 0.25}" x2="${width - padding}" y2="${padding + (height - padding * 2) * 0.25}"></line>
+            <line class="chart-grid" x1="${leftPadding}" y1="${height / 2}" x2="${width - padding}" y2="${height / 2}"></line>
+            <line class="chart-grid" x1="${leftPadding}" y1="${padding + (height - padding * 2) * 0.75}" x2="${width - padding}" y2="${padding + (height - padding * 2) * 0.75}"></line>
+            <line class="chart-grid" x1="${leftPadding}" y1="${height - padding}" x2="${width - padding}" y2="${height - padding}"></line>
+            ${rangeLines}
+            <path class="chart-fill" d="${areaPath}"></path>
+            <path class="chart-path" d="${path}"></path>
+            ${this._wateringMarkersTemplate(wateringEvents, points, width, height, padding, leftPadding, windowStart, windowEnd)}
+            <g class="chart-hover" data-chart-hover hidden>
+              <line class="chart-hover-guide" data-chart-hover-guide x1="${leftPadding}" y1="${padding}" x2="${leftPadding}" y2="${height - padding}"></line>
+              <circle class="chart-hover-dot" data-chart-hover-dot cx="${leftPadding}" cy="${height - padding}" r="5"></circle>
+              <g data-chart-tooltip transform="translate(${leftPadding} ${padding})">
+                <rect class="chart-tooltip-box" width="124" height="48" rx="8"></rect>
+                <text class="chart-tooltip-value" data-chart-tooltip-value x="10" y="20"></text>
+                <text class="chart-tooltip-time" data-chart-tooltip-time x="10" y="38"></text>
+              </g>
+            </g>
+          </svg>
+        </div>
+        <div class="chart-footer">
+          ${this._historyTimeTemplate(windowStart)}
+          ${this._historyTimeTemplate(windowEnd, "end")}
+        </div>
+      </div>
+    `;
+  }
+
+  _historyScaleButtonTemplate(hours, label, currentHours) {
+    const selected = Number(currentHours) === hours;
+    return `<button type="button" class="secondary history-scale${selected ? " selected" : ""}" data-action="history-scale" data-hours="${hours}" aria-pressed="${selected ? "true" : "false"}">${label}</button>`;
+  }
+
+  _historyScaleRowTemplate(currentHours) {
+    return `
+      <div class="history-scale-row" aria-label="History scale">
+        ${this._historyScaleButtonTemplate(24, "24h", currentHours)}
+        ${this._historyScaleButtonTemplate(72, "3d", currentHours)}
+        ${this._historyScaleButtonTemplate(168, "7d", currentHours)}
+      </div>
+    `;
+  }
+
+  _detailHistoryPoints(entities, hours = 168) {
+    const state = this._detailHistoryState(entities);
+    const attrHistory = state?.attributes?.history;
+    const now = Date.now();
+    const cutoff = now - this._clamp(Number(hours) || 168, 1, 168) * 60 * 60 * 1000;
+    if (Array.isArray(attrHistory) && attrHistory.length) {
+      return attrHistory
+        .map((item) => ({
+          t: new Date(item.timestamp).getTime(),
+          v: Number(item.moisture),
+        }))
+        .filter((point) => Number.isFinite(point.t) && point.t >= cutoff && point.t <= now && Number.isFinite(point.v) && point.v > 0 && point.v <= 100)
+        .sort((a, b) => a.t - b.t);
+    }
+    return [];
+  }
+
+  _allDetailHistoryPoints(historyState) {
+    const attrHistory = historyState?.attributes?.history;
+    if (!Array.isArray(attrHistory)) {
+      return [];
+    }
+    return attrHistory
+      .map((item) => ({
+        t: new Date(item.timestamp).getTime(),
+        v: Number(item.moisture),
+      }))
+      .filter((point) => Number.isFinite(point.t) && Number.isFinite(point.v) && point.v > 0 && point.v <= 100)
+      .sort((a, b) => a.t - b.t);
+  }
+
+  _historyEmptyText(historyState, hours) {
+    const allPoints = this._allDetailHistoryPoints(historyState);
+    if (!allPoints.length) {
+      return "No history received yet";
+    }
+    return `No points in ${this._historyWindowLabel(hours)}; try a wider scale`;
+  }
+
+  _historyWindowLabel(hours) {
+    const value = Number(hours);
+    if (value === 24) {
+      return "24h";
+    }
+    if (value === 72) {
+      return "3d";
+    }
+    if (value === 168) {
+      return "7d";
+    }
+    return `${value}h`;
+  }
+
+  _requestCubeHistoryIfNeeded(entities) {
+    if (!entities?.load_history || !entities?.history_count) {
+      return;
+    }
+    const state = this._state(entities.history_count);
+    if (!state || state.attributes?.history_loading) {
+      return;
+    }
+    const history = state.attributes?.history;
+    if (Array.isArray(history) && history.length) {
+      if (state.attributes?.history_complete && state.attributes?.watering_events_complete) {
+        return;
+      }
+    } else if (state.attributes?.history_complete && state.attributes?.watering_events_complete) {
+      return;
+    }
+    const key = entities.history_count;
+    const now = Date.now();
+    if (this._cubeHistoryRequestedAt[key] && now - this._cubeHistoryRequestedAt[key] < 5 * 60 * 1000) {
+      return;
+    }
+    this._cubeHistoryRequestedAt[key] = now;
+    this._press(entities.load_history).catch(() => undefined);
+  }
+
+  _detailWateringEvents(entities) {
+    const events = this._detailHistoryState(entities)?.attributes?.watering_events;
+    if (!Array.isArray(events)) {
+      return [];
+    }
+    return events
+      .map((event) => new Date(typeof event === "string" ? event : event?.timestamp).getTime())
+      .filter((timestamp) => Number.isFinite(timestamp))
+      .sort((a, b) => a - b);
+  }
+
+  _formatActivityTimestamp(timestamp) {
+    if (!timestamp) {
+      return "";
+    }
+    return new Date(timestamp).toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }
+
+  _overviewActivityItems() {
+    const items = [];
+    const now = Date.now();
+    const pushItem = (item) => {
+      if (!item?.ts || !Number.isFinite(item.ts)) {
+        return;
+      }
+      items.push(item);
+    };
+
+    const device = this._deviceRecord();
+    const deviceEntities = device?.entities || {};
+    if (this._isOn(deviceEntities.connection_problem)) {
+      pushItem({ ts: now + 1, kind: "problem", title: "Device not connected", detail: "Device" });
+    }
+    if (this._isOn(deviceEntities.water_warning)) {
+      pushItem({ ts: now, kind: "problem", title: "Water tank low", detail: "Tank" });
+    }
+    if (this._isOn(deviceEntities.device_locked)) {
+      pushItem({ ts: now - 1, kind: "problem", title: "Device locked", detail: "Device" });
+    }
+
+    this._channels().forEach((channel) => {
+      const entities = { ...deviceEntities, ...(device?.channels?.[channel] || {}) };
+      const channelLabel = this._channelName(channel);
+      const problemLabels = [];
+      if (this._isOn(entities.watering_locked)) {
+        problemLabels.push("Smart watering locked");
+      } else if (this._isOn(entities.watering_issue) && !this._isProblemDismissed(entities.watering_issue, "watering_issue")) {
+        problemLabels.push("Smart watering issue");
+      }
+      if (this._isOn(entities.sensor_disconnected)) {
+        problemLabels.push("Sensor disconnected");
+      } else if (this._isOn(entities.sensor_fault)) {
+        problemLabels.push("Sensor fault");
+      }
+      if (this._isOn(entities.outlet_blocked)) {
+        problemLabels.push("Pump blocked");
+      }
+      if (this._isOn(entities.outlet_locked)) {
+        problemLabels.push("Outlet locked");
+      }
+      problemLabels.forEach((label, index) => {
+        pushItem({
+          ts: now - index,
+          kind: "problem",
+          title: label,
+          detail: channelLabel,
+        });
+      });
+
+      const historyState = this._state(entities.history_count);
+      const events = Array.isArray(historyState?.attributes?.watering_events)
+        ? historyState.attributes.watering_events
+        : [];
+      events.forEach((event) => {
+        const timestamp = new Date(typeof event === "string" ? event : event?.timestamp).getTime();
+        if (!Number.isFinite(timestamp)) {
+          return;
+        }
+        pushItem({
+          ts: timestamp,
+          kind: "watering",
+          title: "Automatic watering",
+          detail: channelLabel,
+        });
+      });
+
+      if (!events.length) {
+        const rawTimestamp = this._state(entities.last_watering)?.state;
+        const timestamp = rawTimestamp ? new Date(rawTimestamp).getTime() : NaN;
+        if (Number.isFinite(timestamp)) {
+          pushItem({
+            ts: timestamp,
+            kind: "watering",
+            title: "Last watering",
+            detail: channelLabel,
+          });
+        }
+      }
+    });
+
+    return items
+      .sort((a, b) => b.ts - a.ts)
+      .slice(0, 6);
+  }
+
+  _activityFeedTemplate() {
+    const items = this._overviewActivityItems();
+    const rows = items.length
+      ? items.map((item) => `
+          <div class="activity-row ${item.kind}">
+            <div>
+              <div class="activity-title">${this._escape(item.title)}</div>
+              <div class="activity-detail">${this._escape(item.detail)}</div>
+            </div>
+            <div class="activity-time">${this._escape(this._formatActivityTimestamp(item.ts))}</div>
+          </div>
+        `).join("")
+      : '<div class="activity-empty">No watering or active errors yet</div>';
+    return `
+      <div class="activity-panel">
+        <div class="activity-list">${rows}</div>
+      </div>
+    `;
+  }
+
+  _wateringMarkersTemplate(events, points, width, height, padding, leftPadding = padding, windowStart = undefined, windowEnd = undefined) {
+    if (!events.length || !points.length) {
+      return "";
+    }
+    const minTime = Number.isFinite(windowStart) ? windowStart : points[0].t;
+    const maxTime = Number.isFinite(windowEnd) ? windowEnd : points[points.length - 1].t;
+    const graphStart = points[0].t;
+    const graphEnd = points[points.length - 1].t;
+    const timeRange = Math.max(1, maxTime - minTime);
+    return events
+      .filter((timestamp) => (
+        timestamp >= minTime
+        && timestamp <= maxTime
+        && timestamp >= graphStart
+        && timestamp <= graphEnd
+      ))
+      .map((timestamp) => {
+        const x = leftPadding + ((timestamp - minTime) / timeRange) * (width - leftPadding - padding);
+        const y = height - padding - 18;
+        return `
+          <g class="watering-marker-group">
+            <circle class="watering-marker-dot" cx="${x}" cy="${y + 22}" r="4"></circle>
+            <path class="watering-marker" transform="translate(${x - 8} ${y}) scale(0.72)" d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0L12 2.69z"></path>
+          </g>
+        `;
+      })
+      .join("");
+  }
+
+  _emptyChannelTemplate({ entities }) {
+    return `
+      <div class="card summary">
+        <div class="header">
+          <div class="plant-icon"><ha-icon icon="mdi:pot-mix-outline"></ha-icon></div>
+          <div>
+            <div class="title">${this._channelLabel()}</div>
+            <div class="subtitle">No plant added</div>
+          </div>
+        </div>
+        <div class="stats">
+          <div class="stat">
+            <div class="label">Moisture</div>
+            <div class="value">${this._escape(this._entityDisplay(entities.moisture, "Unknown"))}</div>
+          </div>
+          <div class="stat">
+            <div class="label">Watering</div>
+            <div class="value">Not configured</div>
+          </div>
+        </div>
+        <button type="button" class="wide-button" data-action="add-plant">Add plant</button>
+      </div>
+    `;
+  }
+
+  _plantSetupTemplate(data) {
+    const options = this._modeOptions()
+      .map((option) => `<option value="${this._escape(option)}" ${this._normalizeMode(option) === this._normalizeMode(data.mode) ? "selected" : ""}>${this._escape(this._modeDisplay(option))}</option>`)
+      .join("");
+    return `
+      <div class="card detail">
+        <div class="header">
+          <div class="plant-icon"><ha-icon icon="mdi:pot-mix-outline"></ha-icon></div>
+          <div>
+            <div class="title">${this._channelLabel()}</div>
+            <div class="subtitle">Add a plant before enabling watering</div>
+          </div>
+        </div>
+        <div class="grid">
+          <label class="field wide">
+            <div class="label">Name</div>
+            <input data-entity="${this._escape(data.entities.name)}" data-domain="text" value="${this._escape(this._plantName())}">
+          </label>
+          <label class="field wide">
+            <div class="label">Initial watering mode</div>
+            <select data-entity="${this._escape(data.entities.mode)}" data-domain="select">${options}</select>
+          </label>
+        </div>
+        <button type="button" data-action="add-plant">Add plant</button>
+      </div>
+    `;
+  }
+
+  _problemBannerTemplate(problems) {
+    if (!problems.length) {
+      return "";
+    }
+    const danger = problems.some((item) => item.severity === "danger");
+    const title = problems.map((item) => item.label).join(" / ");
+    const text = danger
+      ? "Watering is blocked until this is fixed."
+      : "Check the probe before relying on automatic watering.";
+    const dismissible = problems.find((item) => item.dismissible);
+    return `
+      <div class="problem-banner ${danger ? "danger" : ""}">
+        <ha-icon icon="${danger ? "mdi:alert-circle" : "mdi:alert"}"></ha-icon>
+        <div>
+          <div class="problem-title">${this._escape(title)}</div>
+          <div class="problem-text">${this._escape(text)}</div>
+        </div>
+        ${dismissible ? `
+          <button
+            type="button"
+            class="icon-button problem-dismiss"
+            data-action="dismiss-problem"
+            data-entity="${this._escape(dismissible.dismissEntity)}"
+            data-kind="${this._escape(dismissible.dismissKind)}"
+            aria-label="Hide alert"
+          >
+            <ha-icon icon="mdi:close"></ha-icon>
+          </button>
+        ` : ""}
+      </div>
+    `;
+  }
+
+  _wateringDialogTemplate() {
+    return `
+      <div class="dialog-backdrop" data-action="close-dialog">
+        <div class="dialog" role="dialog" aria-modal="true" aria-label="Manual watering">
+          <div class="dialog-title">Manual watering</div>
+          <label class="field wide">
+            <div class="label">Amount, mL</div>
+            <input type="number" min="30" max="150" step="10" data-action="dialog-seconds" value="${this._wateringSeconds}">
+          </label>
+          <div class="dialog-actions">
+            <button type="button" class="secondary" data-action="close-dialog">Cancel</button>
+            <button type="button" data-action="confirm-water">Water</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  _reservoirGuideSteps() {
+    return [
+      {
+        image: "/local/growcube/images/external-reservoir-01.png",
+        title: "Remove the side plug",
+        text: "Unplug the rubber plug on the back of GrowCube.",
+      },
+      {
+        image: "/local/growcube/images/external-reservoir-02.png",
+        title: "Insert the water tube",
+        text: "Insert the tube into the water cube through the external hole.",
+      },
+      {
+        image: "/local/growcube/images/external-reservoir-03.png",
+        title: "Remove the internal filter",
+        text: "Unplug the filter at the water inlet inside the GrowCube box.",
+      },
+      {
+        image: "/local/growcube/images/external-reservoir-04.png",
+        title: "Connect the tube inside",
+        text: "Insert the water pipe into the internal water inlet.",
+      },
+      {
+        image: "/local/growcube/images/external-reservoir-05.png",
+        title: "Attach the external intake",
+        text: "Connect the external intake adapter to the water tube.",
+      },
+      {
+        image: "/local/growcube/images/external-reservoir-06.png",
+        title: "Place the tube in water",
+        text: "Put the tube end into the external reservoir and keep the inlet and outlet pipes full of water before automatic watering.",
+      },
+    ];
+  }
+
+  _reservoirGuideTemplate() {
+    const steps = this._reservoirGuideSteps();
+    const stepIndex = this._clamp(Number(this._reservoirGuideStep), 0, steps.length - 1);
+    const step = steps[stepIndex];
+    const isLast = stepIndex >= steps.length - 1;
+    return `
+      <div class="dialog-backdrop" data-action="close-reservoir-guide">
+        <div class="dialog guide-dialog" role="dialog" aria-modal="true" aria-label="External reservoir setup">
+          <div class="dialog-title">External reservoir setup</div>
+          <div class="guide-body">
+            <div class="guide-image-wrap">
+              <img class="guide-image" src="${this._escape(step.image)}" alt="">
+            </div>
+            <div class="guide-copy">
+              <div class="guide-step-title">${this._escape(step.title)}</div>
+              <div class="guide-step-text">${this._escape(step.text)}</div>
+            </div>
+            <div class="guide-nav">
+              <button type="button" class="secondary" data-action="reservoir-guide-prev" ${stepIndex <= 0 ? "disabled" : ""}>Back</button>
+              <div class="guide-counter">${stepIndex + 1} / ${steps.length}</div>
+              <button type="button" data-action="${isLast ? "continue-reservoir-guide" : "reservoir-guide-next"}">${isLast ? "Continue" : "Next"}</button>
+            </div>
+            <label class="guide-checkbox">
+              <input type="checkbox" data-action="reservoir-guide-dont-show" ${this._reservoirGuideDontShow ? "checked" : ""}>
+              <span>Don't show again</span>
+            </label>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  _reservoirDialogTemplate() {
+    return `
+      <div class="dialog-backdrop" data-action="close-reservoir-dialog">
+        <div class="dialog" role="dialog" aria-modal="true" aria-label="Custom reservoir">
+          <div class="dialog-title">Custom reservoir</div>
+          <label class="field wide">
+            <div class="label">Capacity, mL</div>
+            <input type="number" min="500" max="50000" step="50" data-action="reservoir-amount" value="${this._reservoirAmount}">
+          </label>
+          <div class="dialog-actions">
+            <button type="button" class="secondary" data-action="close-reservoir-dialog">Cancel</button>
+            <button type="button" data-action="confirm-reservoir">Save</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  _plantWizardDialogTemplate() {
+    const titles = ["Find plant", "Plant details", "Choose channel", "Watering mode", "Watering settings", "Review"];
+    return `
+      <div class="dialog-backdrop" data-action="close-plant-wizard">
+        <div class="dialog" role="dialog" aria-modal="true" aria-label="Add plant">
+          <div class="dialog-title">${titles[this._plantWizardStep] || "Add plant"}</div>
+          <div class="wizard-progress">
+            ${[0, 1, 2, 3, 4, 5].map((step) => `<div class="wizard-dot ${step <= this._plantWizardStep ? "active" : ""}"></div>`).join("")}
+          </div>
+          <div class="wizard-step">
+            ${this._plantWizardStep === 0 ? this._plantWizardSearchStep() : ""}
+            ${this._plantWizardStep === 1 ? this._plantWizardDetailsStep() : ""}
+            ${this._plantWizardStep === 2 ? this._plantWizardChannelStep() : ""}
+            ${this._plantWizardStep === 3 ? this._plantWizardWateringModeStep() : ""}
+            ${this._plantWizardStep === 4 ? this._plantWizardWateringSettingsStep() : ""}
+            ${this._plantWizardStep === 5 ? this._plantWizardReviewStep() : ""}
+          </div>
+          <div class="dialog-actions">
+            <button type="button" class="secondary" data-action="${this._plantWizardStep === 0 ? "close-plant-wizard-button" : "plant-wizard-back"}">
+              ${this._plantWizardStep === 0 ? "Cancel" : "Back"}
+            </button>
+            <button type="button" data-action="${this._plantWizardStep === 5 ? "confirm-add-plant" : "plant-wizard-next"}" ${this._canAdvancePlantWizard() ? "" : "disabled"}>
+              ${this._plantWizardStep === 5 ? "Add plant" : "Next"}
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  _modeWizardDialogTemplate() {
+    const titles = ["Watering mode", "Watering settings"];
+    return `
+      <div class="dialog-backdrop" data-action="close-mode-wizard">
+        <div class="dialog" role="dialog" aria-modal="true" aria-label="Change watering mode">
+          <div class="dialog-title">${titles[this._modeWizardStep] || "Change watering mode"}</div>
+          <div class="wizard-progress">
+            ${[0, 1].map((step) => `<div class="wizard-dot ${step <= this._modeWizardStep ? "active" : ""}"></div>`).join("")}
+          </div>
+          <div class="wizard-step">
+            ${this._modeWizardStep === 0 ? this._modeWizardModeStep() : ""}
+            ${this._modeWizardStep === 1 ? this._modeWizardSettingsStep() : ""}
+          </div>
+          <div class="dialog-actions">
+            <button type="button" class="secondary" data-action="${this._modeWizardStep === 0 ? "close-mode-wizard-button" : "mode-wizard-back"}">
+              ${this._modeWizardStep === 0 ? "Cancel" : "Back"}
+            </button>
+            <button type="button" data-action="${this._modeWizardStep === 1 ? "confirm-mode-wizard" : "mode-wizard-next"}" ${this._canAdvanceModeWizard() ? "" : "disabled"}>
+              ${this._modeWizardStep === 1 ? "Save" : "Next"}
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  _modeWizardModeStep() {
+    return `
+      <div class="mode-grid">
+        <button type="button" class="mode-choice ${this._modeWizardMode === "Smart" ? "active" : ""}" data-action="mode-wizard-mode-choice" data-mode="Smart">
+          <div class="mode-title">Smart watering</div>
+          <div class="mode-text">Water when soil moisture drops below the selected range.</div>
+        </button>
+        <button type="button" class="mode-choice ${this._modeWizardMode === "Repeating" ? "active" : ""}" data-action="mode-wizard-mode-choice" data-mode="Repeating">
+          <div class="mode-title">Timed watering</div>
+          <div class="mode-text">Water a fixed amount on a repeating interval.</div>
+        </button>
+      </div>
+    `;
+  }
+
+  _modeWizardSettingsStep() {
+    return `
+      ${this._modeWizardMode === "Repeating" ? `
+        <div class="grid">
+          <div class="field time-field">
+            <div class="label">First watering</div>
+            <input type="time" data-action="mode-wizard-start-time" value="${this._modeWizardStartTime().slice(0, 5)}">
+          </div>
+          <label class="field">
+            <div class="label">Amount, mL</div>
+            <input type="number" min="10" max="500" step="10" data-action="mode-wizard-amount" value="${this._modeWizardAmount}">
+          </label>
+          <label class="field">
+            <div class="label">Interval, days</div>
+            <input type="number" min="1" max="10" step="1" data-action="mode-wizard-interval-days" value="${this._modeWizardIntervalDays}">
+          </label>
+        </div>
+      ` : ""}
+      ${this._modeWizardMode === "Smart" ? `
+        <div class="grid">
+          <div class="field wide">
+            <div class="section-title">Moisture range</div>
+          </div>
+          <label class="field">
+            <div class="label">Minimum moisture, %</div>
+            <input type="number" min="1" max="98" step="1" data-action="mode-wizard-smart-min" value="${this._modeWizardSmartMin}">
+          </label>
+          <label class="field">
+            <div class="label">Maximum moisture, %</div>
+            <input type="number" min="2" max="99" step="1" data-action="mode-wizard-smart-max" value="${this._modeWizardSmartMax}">
+          </label>
+        </div>
+        <div class="grid">
+          <div class="field wide">
+            <div class="label">Daytime watering</div>
+            <div class="mode-grid">
+              <button type="button" class="mode-choice compact ${this._modeWizardDaytime ? "active" : ""}" data-action="mode-wizard-daytime-choice" data-daytime="on">On</button>
+              <button type="button" class="mode-choice compact ${!this._modeWizardDaytime ? "active" : ""}" data-action="mode-wizard-daytime-choice" data-daytime="off">Off</button>
+            </div>
+          </div>
+        </div>
+      ` : ""}
+    `;
+  }
+
+  _plantWizardSearchStep() {
+    const selected = this._plantWizardSelected;
+    const pageSize = 3;
+    const pageCount = this._plantWizardResultPages();
+    const page = this._clamp(this._plantWizardResultPage, 0, pageCount - 1);
+    const visibleResults = this._plantWizardResults.slice(page * pageSize, page * pageSize + pageSize);
+    return `
+      <label class="field wide">
+        <div class="label">Search plant catalog</div>
+        <div class="compact-row">
+          <input data-action="plant-wizard-search" value="${this._escape(this._plantWizardSearch)}" placeholder="basil, monstera, tomato">
+          <button type="button" data-action="search-plant-catalog">Search</button>
+        </div>
+      </label>
+      ${
+        this._plantWizardLoading
+          ? '<div class="label">Loading plant catalog...</div>'
+          : this._plantWizardError
+            ? `<div class="label">${this._escape(this._plantWizardError)}</div>`
+            : ""
+      }
+      ${visibleResults.length ? `<div class="plants-list">
+        ${visibleResults.map((item, index) => this._catalogResultTemplate(item, page * pageSize + index)).join("")}
+      </div>` : ""}
+      ${this._plantWizardResults.length > pageSize ? `
+        <div class="dialog-actions">
+          <button type="button" class="secondary" data-action="plant-results-prev" ${page <= 0 ? "disabled" : ""}>Previous</button>
+          <button type="button" class="secondary" data-action="plant-results-next" ${page >= pageCount - 1 ? "disabled" : ""}>Next ${page + 1}/${pageCount}</button>
+        </div>
+      ` : ""}
+      ${selected ? `<div class="label">Selected: ${this._escape(selected.category || "Plant profile")} · moisture ${this._escape(selected.moisture_min)}-${this._escape(selected.moisture_max)}%</div>` : ""}
+    `;
+  }
+
+  _plantWizardDetailsStep() {
+    const item = this._plantWizardSelected || {};
+    const name = item.display_name || item.name || this._plantWizardName || "Unknown plant";
+    const about = item.description || "No catalog description is available for this plant.";
+    return `
+      <div class="profile-panel">
+        <div class="profile-hero">
+          <div class="profile-photo">
+            ${item.image_url ? `<img src="${this._escape(item.image_url)}" alt="">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
+          </div>
+          <div>
+            <div class="title">${this._escape(name)}</div>
+            <div class="subtitle">${this._escape(item.category || "Plant profile")}</div>
+          </div>
+        </div>
+        <div>
+          <div class="section-title">About</div>
+          <div class="profile-about">${this._escape(about)}</div>
+        </div>
+        <div class="profile-stats">
+          ${this._profileStatTemplate("Soil moisture", this._rangeText(item.moisture_min, item.moisture_max, "%"))}
+          ${this._profileStatTemplate("Temperature", this._rangeText(item.temp_min, item.temp_max, "°C"))}
+          ${this._profileStatTemplate("Air humidity", this._rangeText(item.air_humidity_min, item.air_humidity_max, "%"))}
+        </div>
+      </div>
+    `;
+  }
+
+  _plantWizardChannelStep() {
+    const availableChannels = this._channels().filter((channel) => (
+      channel === this._plantWizardChannel || !this._isPlantConfigured(this._entities(channel), false)
+    ));
+    return `
+      <div class="channel-grid">
+        ${availableChannels.map((channel) => `
+          <button type="button" class="channel-choice ${channel === this._plantWizardChannel ? "active" : ""}" data-action="plant-wizard-channel-choice" data-channel="${channel}">
+            ${this._channelName(channel)}
+          </button>
+        `).join("")}
+      </div>
+    `;
+  }
+
+  _plantWizardWateringModeStep() {
+    return `
+      <div class="mode-grid">
+        <button type="button" class="mode-choice ${this._plantWizardMode === "Smart" ? "active" : ""}" data-action="plant-wizard-mode-choice" data-mode="Smart">
+          <div class="mode-title">Smart watering</div>
+          <div class="mode-text">Water when soil moisture drops below the selected range.</div>
+        </button>
+        <button type="button" class="mode-choice ${this._plantWizardMode === "Repeating" ? "active" : ""}" data-action="plant-wizard-mode-choice" data-mode="Repeating">
+          <div class="mode-title">Timed watering</div>
+          <div class="mode-text">Water a fixed amount on a repeating interval.</div>
+        </button>
+      </div>
+    `;
+  }
+
+  _plantWizardWateringSettingsStep() {
+    return `
+      ${this._plantWizardMode === "Repeating" ? `
+        <div class="grid">
+          <div class="field time-field">
+            <div class="label">First watering</div>
+            <input type="time" data-action="plant-wizard-start-time" value="${this._plantWizardStartTime().slice(0, 5)}">
+          </div>
+          <label class="field">
+            <div class="label">Amount, mL</div>
+            <input type="number" min="10" max="500" step="10" data-action="plant-wizard-amount" value="${this._plantWizardAmount}">
+          </label>
+          <label class="field">
+            <div class="label">Interval, days</div>
+            <input type="number" min="1" max="10" step="1" data-action="plant-wizard-interval-days" value="${this._plantWizardIntervalDays}">
+          </label>
+        </div>
+      ` : ""}
+      ${this._plantWizardMode === "Smart" ? `
+        <div class="grid">
+          <label class="field">
+            <div class="label">Minimum moisture, %</div>
+            <input type="number" min="1" max="98" step="1" data-action="plant-wizard-smart-min" value="${this._plantWizardSmartMin}">
+          </label>
+          <label class="field">
+            <div class="label">Maximum moisture, %</div>
+            <input type="number" min="2" max="99" step="1" data-action="plant-wizard-smart-max" value="${this._plantWizardSmartMax}">
+          </label>
+          <div class="field wide">
+            <div class="label">Daytime watering</div>
+            <div class="mode-grid">
+              <button type="button" class="mode-choice compact ${this._plantWizardDaytime ? "active" : ""}" data-action="plant-wizard-daytime-choice" data-daytime="on">On</button>
+              <button type="button" class="mode-choice compact ${!this._plantWizardDaytime ? "active" : ""}" data-action="plant-wizard-daytime-choice" data-daytime="off">Off</button>
+            </div>
+          </div>
+        </div>
+      ` : ""}
+    `;
+  }
+
+  _plantWizardReviewStep() {
+    return `
+      <div class="wizard-review">
+        <div class="plant-photo">
+          ${this._plantWizardPhotoUrl ? `<img src="${this._escape(this._plantWizardPhotoUrl)}" alt="">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
+        </div>
+        <div>
+          <div class="title">${this._escape(this._plantWizardName || "New plant")}</div>
+          <div class="subtitle">${this._escape(this._channelName(this._plantWizardChannel))} · ${this._escape(this._plantWizardModeLabel())}</div>
+          <div class="label">${this._escape(this._plantWizardMode === "Smart" ? `${this._plantWizardSmartMin}-${this._plantWizardSmartMax}% moisture · daytime ${this._plantWizardDaytime ? "on" : "off"}` : `${this._plantWizardAmount} mL every ${this._plantWizardIntervalDays} day${this._plantWizardIntervalDays === 1 ? "" : "s"} · starts ${this._plantWizardStartTime().slice(0, 5)}`)}</div>
+        </div>
+      </div>
+    `;
+  }
+
+  _catalogResultTemplate(item, index) {
+    const name = item.display_name || item.name || "Unknown plant";
+    return `
+      <div class="plant-row" data-action="select-catalog-plant" data-index="${index}" role="button" tabindex="0">
+        <div class="plant-photo">
+          ${item.image_url ? `<img src="${this._escape(item.image_url)}" alt="">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
+        </div>
+        <div class="plant-meta">
+          <div class="title">${this._escape(name)}</div>
+          <div class="subtitle">${this._escape(item.category || "Plant profile")}</div>
+        </div>
+        <div class="plant-stats">
+          <div class="label">Moisture</div>
+          <div class="value">${this._escape(item.moisture_min ?? 20)}-${this._escape(item.moisture_max ?? 60)}%</div>
+        </div>
+      </div>
+    `;
+  }
+
+  _profileStatTemplate(label, value) {
+    return `
+      <div class="stat">
+        <div class="label">${this._escape(label)}</div>
+        <div class="value">${this._escape(value || "Unknown")}</div>
+      </div>
+    `;
+  }
+
+  _rangeText(min, max, unit) {
+    const minNumber = Number(min);
+    const maxNumber = Number(max);
+    if (Number.isFinite(minNumber) && Number.isFinite(maxNumber) && (minNumber || maxNumber)) {
+      return `${minNumber}-${maxNumber}${unit}`;
+    }
+    if (Number.isFinite(minNumber) && minNumber) {
+      return `${minNumber}${unit}`;
+    }
+    if (Number.isFinite(maxNumber) && maxNumber) {
+      return `${maxNumber}${unit}`;
+    }
+    return "Unknown";
+  }
+
+  _plantWizardModeLabel() {
+    return this._plantWizardMode === "Repeating" ? "Timed watering" : "Smart watering";
+  }
+
+  async _saveScheduleAfterEdit(message) {
+    const save = this._entities().save;
+    if (save) {
+      await this._press(save);
+    }
+    this._showToast(message);
+  }
+
+  _openEditDialog(kind) {
+    if (kind === "mode") {
+      this._openModeWizard();
+      return;
+    }
+    this._editDialog = { kind };
+    this._render();
+  }
+
+  _closeEditDialog() {
+    this._editDialog = null;
+    this._render();
+  }
+
+  _editDialogTemplate() {
+    const kind = this._editDialog?.kind;
+    const entities = this._entities();
+    const mode = this._normalizeMode(this._entityState(entities.mode, "Smart"));
+    const [hour, minute] = this._splitTime(this._entityState(entities.first_watering_time, ""));
+    const currentDays = Math.max(1, Math.round(this._number(entities.interval, 24) / 24));
+    const modeOptions = this._modeOptions()
+      .map((option) => `<option value="${this._escape(option)}" ${this._normalizeMode(option) === mode ? "selected" : ""}>${this._escape(this._modeDisplay(option))}</option>`)
+      .join("");
+    const configs = {
+      plantName: {
+        title: "Plant name",
+        body: `
+          <label class="field wide">
+            <input data-edit-field="plant_name" value="${this._escape(this._plantName())}">
+          </label>
+        `,
+      },
+      mode: {
+        title: "Watering settings",
+        body: `
+          <label class="field wide">
+            <div class="label">Mode</div>
+            <select data-edit-field="mode">${modeOptions}</select>
+          </label>
+          <div class="section-title">Smart watering</div>
+          <label class="field">
+            <div class="label">Minimum moisture, %</div>
+            <input type="number" min="1" max="98" step="1" data-edit-field="smart_min" value="${this._number(entities.smart_min_moisture, 20)}">
+          </label>
+          <label class="field">
+            <div class="label">Maximum moisture, %</div>
+            <input type="number" min="2" max="99" step="1" data-edit-field="smart_max" value="${this._number(entities.smart_max_moisture, 60)}">
+          </label>
+          <label class="field wide">
+            <div class="label">Daytime watering</div>
+            <select data-edit-field="daytime">
+              <option value="on" ${this._isOn(entities.smart_daytime_watering) ? "selected" : ""}>On</option>
+              <option value="off" ${!this._isOn(entities.smart_daytime_watering) ? "selected" : ""}>Off</option>
+            </select>
+          </label>
+          <div class="section-title">Timed watering</div>
+          <div class="field time-field">
+            <div class="label">First watering</div>
+            <input type="time" data-edit-field="first_time" value="${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}">
+          </div>
+          <label class="field">
+            <div class="label">Watering amount, mL</div>
+            <input type="number" min="10" max="500" step="10" data-edit-field="schedule_amount" value="${this._number(entities.duration, 50)}">
+          </label>
+          <label class="field">
+            <div class="label">Interval, days</div>
+            <input type="number" min="1" max="10" step="1" data-edit-field="schedule_days" value="${currentDays}">
+          </label>
+        `,
+      },
+      manual: {
+        title: "Manual watering",
+        body: `
+          <label class="field wide">
+            <div class="label">Manual amount, mL</div>
+            <input type="number" min="30" max="150" step="10" data-edit-field="manual_amount" value="${this._number(entities.manual_duration, 50)}">
+          </label>
+        `,
+      },
+      smartRange: {
+        title: "Moisture range",
+        body: `
+          <label class="field">
+            <div class="label">Minimum moisture, %</div>
+            <input type="number" min="1" max="98" step="1" data-edit-field="smart_min" value="${this._number(entities.smart_min_moisture, 20)}">
+          </label>
+          <label class="field">
+            <div class="label">Maximum moisture, %</div>
+            <input type="number" min="2" max="99" step="1" data-edit-field="smart_max" value="${this._number(entities.smart_max_moisture, 60)}">
+          </label>
+        `,
+      },
+      daytime: {
+        title: "Daytime watering",
+        body: `
+          <label class="field wide">
+            <div class="label">Daytime watering</div>
+            <select data-edit-field="daytime">
+              <option value="on" ${this._isOn(entities.smart_daytime_watering) ? "selected" : ""}>On</option>
+              <option value="off" ${!this._isOn(entities.smart_daytime_watering) ? "selected" : ""}>Off</option>
+            </select>
+          </label>
+        `,
+      },
+      firstWatering: {
+        title: "First watering",
+        body: `
+          <div class="field time-field">
+            <input type="time" data-edit-field="first_time" value="${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}">
+          </div>
+        `,
+      },
+      schedule: {
+        title: "Schedule",
+        body: `
+          <label class="field">
+            <div class="label">Watering amount, mL</div>
+            <input type="number" min="10" max="500" step="10" data-edit-field="schedule_amount" value="${this._number(entities.duration, 50)}">
+          </label>
+          <label class="field">
+            <div class="label">Interval, days</div>
+            <input type="number" min="1" max="10" step="1" data-edit-field="schedule_days" value="${currentDays}">
+          </label>
+        `,
+      },
+    };
+    const config = configs[kind] || configs.mode;
+    return `
+      <div class="dialog-backdrop" data-action="close-edit-dialog">
+        <div class="dialog edit-dialog" role="dialog" aria-modal="true" aria-label="${this._escape(config.title)}">
+          <div class="dialog-title">${this._escape(config.title)}</div>
+          <div class="grid">${config.body}</div>
+          <div class="dialog-actions">
+            <button type="button" class="secondary" data-action="close-edit-button">Cancel</button>
+            <button type="button" data-action="confirm-edit-dialog">Save</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  _editValue(field) {
+    return this.shadowRoot.querySelector(`[data-edit-field="${field}"]`)?.value;
+  }
+
+  _deletePlantDialogTemplate() {
+    const plantName = this._plantName();
+    return `
+      <div class="dialog-backdrop" data-action="close-delete-plant-dialog">
+        <div class="dialog edit-dialog" role="dialog" aria-modal="true" aria-label="Delete plant">
+          <div class="dialog-title">Delete plant</div>
+          <div class="subtitle">Delete ${this._escape(plantName)}? This clears the plant setup, schedules, history, watering marks, and saved photo.</div>
+          <div class="dialog-actions">
+            <button type="button" class="secondary" data-action="close-delete-plant-button">Cancel</button>
+            <button type="button" class="danger" data-action="confirm-delete-plant">Delete</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  _closeDeletePlantDialog() {
+    this._deletePlantDialogOpen = false;
+    this._render();
+  }
+
+  async _confirmDeletePlant() {
+    try {
+      await this._press(this._entities().reset);
+      this._deletePlantDialogOpen = false;
+      this._aboutDialogOpen = false;
+      this._showToast("Plant deleted");
+      const path = this._detailBackPath();
+      window.history.pushState(null, "", path);
+      window.dispatchEvent(new CustomEvent("location-changed"));
+    } catch (error) {
+      this._showError("Delete failed");
+    }
+  }
+
+  async _confirmModeWizard() {
+    const entities = this._entities();
+    try {
+      if (!entities.mode) {
+        throw new Error("Mode entity is unavailable");
+      }
+      await this._setSelect(entities.mode, this._normalizeMode(this._modeWizardMode));
+      if (this._modeWizardMode === "Smart") {
+        if (!entities.smart_min_moisture || !entities.smart_max_moisture || !entities.smart_daytime_watering) {
+          throw new Error("Smart watering entities are unavailable");
+        }
+        await this._setNumber(entities.smart_min_moisture, this._modeWizardSmartMin);
+        await this._setNumber(entities.smart_max_moisture, this._modeWizardSmartMax);
+        await this._setSwitch(entities.smart_daytime_watering, this._modeWizardDaytime);
+      } else if (this._modeWizardMode === "Repeating") {
+        if (!entities.first_watering_time || !entities.duration || !entities.interval) {
+          throw new Error("Timed watering entities are unavailable");
+        }
+        await this._setTime(entities.first_watering_time, this._modeWizardStartTime());
+        await this._setNumber(entities.duration, this._modeWizardAmount);
+        await this._setNumber(entities.interval, this._modeWizardIntervalDays * 24);
+      }
+      await this._saveScheduleAfterEdit("Watering settings updated");
+      this._modeWizardOpen = false;
+      this._render();
+    } catch (error) {
+      this._showError(error?.message || "Could not update watering mode");
+    }
+  }
+
+  async _confirmEditDialog() {
+    const kind = this._editDialog?.kind;
+    const entities = this._entities();
+    try {
+      if (kind === "mode") {
+        if (!entities.mode) {
+          throw new Error("Mode entity is unavailable");
+        }
+        const modeValue = this._normalizeMode(this._editValue("mode"));
+        await this._setSelect(entities.mode, modeValue);
+        if (modeValue === "Smart") {
+          if (!entities.smart_min_moisture || !entities.smart_max_moisture || !entities.smart_daytime_watering) {
+            throw new Error("Smart watering entities are unavailable");
+          }
+          const min = this._clamp(Number(this._editValue("smart_min")), 1, 98);
+          const max = this._clamp(Number(this._editValue("smart_max")), min + 1, 99);
+          await this._setNumber(entities.smart_min_moisture, min);
+          await this._setNumber(entities.smart_max_moisture, max);
+          await this._setSwitch(entities.smart_daytime_watering, this._editValue("daytime") === "on");
+        } else if (modeValue === "Repeating") {
+          if (!entities.first_watering_time || !entities.duration || !entities.interval) {
+            throw new Error("Timed watering entities are unavailable");
+          }
+          const [hour, minute] = this._splitTime(this._editValue("first_time"));
+          const amount = this._clamp(Number(this._editValue("schedule_amount")), 10, 500);
+          const intervalHours = this._clamp(Number(this._editValue("schedule_days")), 1, 10) * 24;
+          await this._setTime(entities.first_watering_time, `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00`);
+          await this._setNumber(entities.duration, amount);
+          await this._setNumber(entities.interval, intervalHours);
+        }
+        await this._saveScheduleAfterEdit("Watering settings updated");
+      } else if (kind === "plantName") {
+        if (!entities.name) {
+          throw new Error("Plant name entity is unavailable");
+        }
+        const name = String(this._editValue("plant_name") || "").trim();
+        if (!name) {
+          throw new Error("Plant name cannot be empty");
+        }
+        await this._setText(entities.name, name);
+        this._showToast("Plant name updated");
+      } else if (kind === "manual") {
+        if (!entities.manual_duration) {
+          throw new Error("Manual amount entity is unavailable");
+        }
+        await this._setNumber(entities.manual_duration, this._clamp(Number(this._editValue("manual_amount")), 30, 150));
+        this._showToast("Manual amount updated");
+      } else if (kind === "smartRange") {
+        if (!entities.smart_min_moisture || !entities.smart_max_moisture) {
+          throw new Error("Moisture range entities are unavailable");
+        }
+        const min = this._clamp(Number(this._editValue("smart_min")), 1, 98);
+        const max = this._clamp(Number(this._editValue("smart_max")), min + 1, 99);
+        await this._setNumber(entities.smart_min_moisture, min);
+        await this._setNumber(entities.smart_max_moisture, max);
+        await this._saveScheduleAfterEdit("Moisture range updated");
+      } else if (kind === "daytime") {
+        if (!entities.smart_daytime_watering) {
+          throw new Error("Daytime watering entity is unavailable");
+        }
+        await this._setSwitch(entities.smart_daytime_watering, this._editValue("daytime") === "on");
+        await this._saveScheduleAfterEdit("Daytime watering updated");
+      } else if (kind === "firstWatering") {
+        if (!entities.first_watering_time) {
+          throw new Error("First watering entity is unavailable");
+        }
+        const [hour, minute] = this._splitTime(this._editValue("first_time"));
+        await this._setTime(entities.first_watering_time, `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00`);
+        await this._saveScheduleAfterEdit("First watering updated");
+      } else if (kind === "schedule") {
+        if (!entities.duration || !entities.interval) {
+          throw new Error("Schedule entities are unavailable");
+        }
+        const amount = this._clamp(Number(this._editValue("schedule_amount")), 10, 500);
+        const intervalHours = this._clamp(Number(this._editValue("schedule_days")), 1, 10) * 24;
+        await this._setNumber(entities.duration, amount);
+        await this._setNumber(entities.interval, intervalHours);
+        await this._saveScheduleAfterEdit("Schedule updated");
+      }
+      this._editDialog = null;
+      this._render();
+    } catch (error) {
+      this._showError(error?.message || "Could not update setting");
+    }
+  }
+
+  _chartPointerPosition(svg, event) {
+    const rect = svg.getBoundingClientRect();
+    const viewBox = svg.viewBox?.baseVal;
+    if (!rect.width || !rect.height || !viewBox) {
+      return null;
+    }
+    return {
+      x: viewBox.x + ((event.clientX - rect.left) / rect.width) * viewBox.width,
+      y: viewBox.y + ((event.clientY - rect.top) / rect.height) * viewBox.height,
+    };
+  }
+
+  _nearestChartPoint(points, x) {
+    if (!points.length) {
+      return null;
+    }
+    if (x < points[0].x || x > points[points.length - 1].x) {
+      return null;
+    }
+    return points.reduce((nearest, point) => (
+      Math.abs(point.x - x) < Math.abs(nearest.x - x) ? point : nearest
+    ), points[0]);
+  }
+
+  _chartPoints(svg) {
+    if (svg._growcubeChartPoints) {
+      return svg._growcubeChartPoints;
+    }
+    try {
+      svg._growcubeChartPoints = JSON.parse(svg.dataset.chartPoints || "[]");
+    } catch (_error) {
+      svg._growcubeChartPoints = [];
+    }
+    return svg._growcubeChartPoints;
+  }
+
+  _updateChartHover(container, event) {
+    const svg = container.matches?.("[data-chart-svg]") ? container : container.querySelector("[data-chart-svg]");
+    if (!svg) {
+      return;
+    }
+    const points = this._chartPoints(svg);
+    const position = this._chartPointerPosition(svg, event);
+    if (!points.length || !position) {
+      return;
+    }
+    const nearest = this._nearestChartPoint(points, position.x);
+    if (!nearest) {
+      return;
+    }
+    const viewBox = svg.viewBox.baseVal;
+    const hover = svg.querySelector("[data-chart-hover]");
+    const guide = svg.querySelector("[data-chart-hover-guide]");
+    const dot = svg.querySelector("[data-chart-hover-dot]");
+    const tooltip = svg.querySelector("[data-chart-tooltip]");
+    const value = svg.querySelector("[data-chart-tooltip-value]");
+    const time = svg.querySelector("[data-chart-tooltip-time]");
+    if (!hover || !guide || !dot || !tooltip || !value || !time) {
+      return;
+    }
+    const tooltipWidth = 124;
+    const tooltipHeight = 48;
+    const tooltipGap = 12;
+    const tooltipX = nearest.x + tooltipWidth + tooltipGap > viewBox.width
+      ? Math.max(0, nearest.x - tooltipWidth - tooltipGap)
+      : Math.min(viewBox.width - tooltipWidth, nearest.x + tooltipGap);
+    const tooltipY = nearest.y - tooltipHeight - tooltipGap < 0
+      ? Math.min(viewBox.height - tooltipHeight, nearest.y + tooltipGap)
+      : nearest.y - tooltipHeight - tooltipGap;
+    guide.setAttribute("x1", nearest.x);
+    guide.setAttribute("x2", nearest.x);
+    dot.setAttribute("cx", nearest.x);
+    dot.setAttribute("cy", nearest.y);
+    tooltip.setAttribute("transform", `translate(${tooltipX} ${tooltipY})`);
+    value.textContent = `${Math.round(nearest.v)}%`;
+    time.textContent = this._formatChartHoverDate(nearest.t);
+    hover.removeAttribute("hidden");
+  }
+
+  _hideChartHover(container) {
+    const svg = container.matches?.("[data-chart-svg]") ? container : container.querySelector("[data-chart-svg]");
+    if (!svg) {
+      return;
+    }
+    const hover = svg.querySelector("[data-chart-hover]");
+    if (hover) {
+      hover.setAttribute("hidden", "");
+    }
+  }
+
+  _bindEvents() {
+    this.shadowRoot.querySelectorAll("[data-action]").forEach((element) => {
       element.addEventListener("click", (event) => {
-        event.stopPropagation();
-        this._press(element.dataset.button);
+        const action = element.dataset.action;
+        if (action === "navigate" && event.target.closest("button")) {
+          return;
+        }
+        if (action === "more-info") {
+          event.stopPropagation();
+          this._deviceMenuOpen = false;
+          this._showMoreInfo(element.dataset.entity);
+        } else if (action === "navigate") {
+          this._deviceMenuOpen = false;
+          this._navigate();
+        } else if (action === "navigate-channel") {
+          this._deviceMenuOpen = false;
+          this._navigateToChannel(element.dataset.channel, element.dataset.deviceId || this._selectedDeviceId());
+        } else if (action === "toggle-device-menu") {
+          event.stopPropagation();
+          this._deviceMenuOpen = !this._deviceMenuOpen;
+          this._render();
+        } else if (action === "select-device") {
+          event.stopPropagation();
+          this._setSelectedDevice(element.dataset.deviceId);
+        } else if (action === "open-add-plant") {
+          event.stopPropagation();
+          this._deviceMenuOpen = false;
+          this._openPlantWizard();
+        } else if (action === "search-plant-catalog") {
+          event.stopPropagation();
+          this._searchPlantCatalog();
+        } else if (action === "select-catalog-plant") {
+          event.stopPropagation();
+          this._selectPlantCatalogItem(element.dataset.index);
+        } else if (action === "plant-results-prev") {
+          event.stopPropagation();
+          this._changePlantWizardResultPage(-1);
+        } else if (action === "plant-results-next") {
+          event.stopPropagation();
+          this._changePlantWizardResultPage(1);
+        } else if (action === "plant-wizard-next") {
+          event.stopPropagation();
+          if (this._canAdvancePlantWizard()) {
+            this._setPlantWizardStep(this._plantWizardStep + 1);
+          }
+        } else if (action === "plant-wizard-back") {
+          event.stopPropagation();
+          this._setPlantWizardStep(this._plantWizardStep - 1);
+        } else if (action === "plant-wizard-channel-choice") {
+          event.stopPropagation();
+          this._plantWizardChannel = element.dataset.channel || this._plantWizardChannel;
+          this._render();
+        } else if (action === "plant-wizard-mode-choice") {
+          event.stopPropagation();
+          this._plantWizardMode = element.dataset.mode || this._plantWizardMode;
+          this._render();
+        } else if (action === "plant-wizard-daytime-choice") {
+          event.stopPropagation();
+          this._plantWizardDaytime = element.dataset.daytime === "on";
+          this._render();
+        } else if (action === "mode-wizard-next") {
+          event.stopPropagation();
+          if (this._canAdvanceModeWizard()) {
+            this._setModeWizardStep(this._modeWizardStep + 1);
+          }
+        } else if (action === "mode-wizard-back") {
+          event.stopPropagation();
+          this._setModeWizardStep(this._modeWizardStep - 1);
+        } else if (action === "mode-wizard-mode-choice") {
+          event.stopPropagation();
+          this._modeWizardMode = element.dataset.mode || this._modeWizardMode;
+          this._render();
+        } else if (action === "mode-wizard-daytime-choice") {
+          event.stopPropagation();
+          this._modeWizardDaytime = element.dataset.daytime === "on";
+          this._render();
+        } else if (action === "disable-mode-wizard") {
+          event.stopPropagation();
+          this._disableModeWizard();
+        } else if (action === "water") {
+          event.stopPropagation();
+          this._confirmWatering();
+        } else if (action === "stop") {
+          event.stopPropagation();
+          this._press(this._entities().stop)
+            .then(() => this._showToast("Watering stopped"))
+            .catch(() => this._showError("Stop failed"));
+        } else if (action === "mark-tank-full") {
+          event.stopPropagation();
+          this._press(element.dataset.entity || this._entities().mark_tank_full)
+            .then(() => this._showToast("Tank marked full"))
+            .catch(() => this._showError("Could not update tank"));
+        } else if (action === "refresh-activity") {
+          event.stopPropagation();
+          this._refreshAllHistory();
+        } else if (action === "refresh-current-history") {
+          event.stopPropagation();
+          this._refreshCurrentHistory();
+        } else if (action === "dismiss-problem") {
+          event.stopPropagation();
+          this._dismissProblem(element.dataset.entity, element.dataset.kind);
+        } else if (action === "edit-plant-name") {
+          event.stopPropagation();
+          this._openEditDialog("plantName");
+        } else if (action === "edit-mode") {
+          event.stopPropagation();
+          this._openEditDialog("mode");
+        } else if (action === "edit-manual-amount") {
+          event.stopPropagation();
+          this._openEditDialog("manual");
+        } else if (action === "edit-smart-range") {
+          event.stopPropagation();
+          this._openEditDialog("smartRange");
+        } else if (action === "edit-daytime") {
+          event.stopPropagation();
+          this._openEditDialog("daytime");
+        } else if (action === "edit-first-watering") {
+          event.stopPropagation();
+          this._openEditDialog("firstWatering");
+        } else if (action === "edit-repeating-schedule") {
+          event.stopPropagation();
+          this._openEditDialog("schedule");
+        } else if (action === "toggle-detail-menu") {
+          event.stopPropagation();
+          this._detailMenuOpen = !this._detailMenuOpen;
+          this._render();
+        } else if (action === "open-about") {
+          event.stopPropagation();
+          this._detailMenuOpen = false;
+          this._aboutDialogOpen = true;
+          this._render();
+          this._ensureAboutProfileData(this._entities());
+        } else if (action === "history-scale") {
+          event.stopPropagation();
+          this._setHistoryHours(Number(element.dataset.hours));
+        } else if (action === "set-reservoir-capacity") {
+          event.stopPropagation();
+          const capacity = Number(element.dataset.capacity) || 1500;
+          this._setNumber(element.dataset.entity || this._entities().tank_capacity, capacity)
+            .then(() => this._showToast(`Reservoir set to ${capacity} mL`))
+            .catch(() => this._showError("Could not update capacity"));
+        } else if (action === "custom-capacity") {
+          event.stopPropagation();
+          this._openReservoirGuide(element.dataset.entity, element.dataset.currentCapacity);
+        } else if (action === "add-plant") {
+          event.stopPropagation();
+          this._openPlantWizard();
+        } else if (action === "toggle-smart-daytime") {
+          event.stopPropagation();
+          this._toggleSwitch(this._entities().smart_daytime_watering)
+            .then(() => this._saveScheduleAfterEdit("Daytime watering updated"))
+            .catch((error) => this._showError(error?.message || "Could not update daytime watering"));
+        } else if (action === "reset" || action === "delete-plant") {
+          event.stopPropagation();
+          this._detailMenuOpen = false;
+          this._deletePlantDialogOpen = true;
+          this._render();
+        } else if (action === "close-about-dialog" && event.target === element) {
+          this._aboutDialogOpen = false;
+          this._render();
+        } else if (action === "close-about-button") {
+          this._aboutDialogOpen = false;
+          this._render();
+        } else if (action === "close-delete-plant-dialog" && event.target === element) {
+          this._closeDeletePlantDialog();
+        } else if (action === "close-delete-plant-button") {
+          this._closeDeletePlantDialog();
+        } else if (action === "confirm-delete-plant") {
+          this._confirmDeletePlant();
+        } else if (action === "close-edit-dialog" && event.target === element) {
+          this._closeEditDialog();
+        } else if (action === "close-edit-button") {
+          this._closeEditDialog();
+        } else if (action === "confirm-edit-dialog") {
+          this._confirmEditDialog();
+        } else if (action === "close-reservoir-dialog" && event.target === element) {
+          this._closeReservoirDialog();
+        } else if (action === "confirm-reservoir") {
+          this._confirmReservoir();
+        } else if (action === "close-reservoir-guide" && event.target === element) {
+          this._closeReservoirGuide();
+        } else if (action === "reservoir-guide-prev") {
+          event.stopPropagation();
+          this._setReservoirGuideStep(this._reservoirGuideStep - 1);
+        } else if (action === "reservoir-guide-next") {
+          event.stopPropagation();
+          this._setReservoirGuideStep(this._reservoirGuideStep + 1);
+        } else if (action === "continue-reservoir-guide") {
+          event.stopPropagation();
+          this._continueReservoirGuide();
+        } else if (action === "close-plant-wizard" && event.target === element) {
+          this._closePlantWizard();
+        } else if (action === "close-plant-wizard-button") {
+          this._closePlantWizard();
+        } else if (action === "confirm-add-plant") {
+          this._confirmAddPlant();
+        } else if (action === "close-mode-wizard" && event.target === element) {
+          this._closeModeWizard();
+        } else if (action === "close-mode-wizard-button") {
+          this._closeModeWizard();
+        } else if (action === "confirm-mode-wizard") {
+          this._confirmModeWizard();
+        }
       });
     });
-    this.shadowRoot.querySelectorAll("[data-info]").forEach((element) => {
-      element.addEventListener("click", (event) => {
-        event.stopPropagation();
-        this._moreInfo(element.dataset.info);
+
+    this.shadowRoot.querySelectorAll('[data-action="more-info"], [data-action^="edit-"], [data-action="toggle-smart-daytime"]').forEach((element) => {
+      element.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          element.click();
+        }
       });
     });
-    const current = this._entities();
-    this.shadowRoot.querySelector('[data-action="water"]')?.addEventListener("click", () => this._press(current.water));
-    this.shadowRoot.querySelector('[data-action="stop"]')?.addEventListener("click", () => this._press(current.stop));
-    this.shadowRoot.querySelector('[data-action="history"]')?.addEventListener("click", () => this._press(current.load_history));
+
+    this.shadowRoot.querySelectorAll("[data-chart-visual]").forEach((element) => {
+      element.addEventListener("pointermove", (event) => this._updateChartHover(element, event));
+      element.addEventListener("pointerdown", (event) => this._updateChartHover(element, event));
+      element.addEventListener("pointerleave", () => this._hideChartHover(element));
+      element.addEventListener("pointercancel", () => this._hideChartHover(element));
+      element.addEventListener("mousemove", (event) => this._updateChartHover(element, event));
+      element.addEventListener("mouseleave", () => this._hideChartHover(element));
+    });
+
+    const reservoirAmount = this.shadowRoot.querySelector('[data-action="reservoir-amount"]');
+    if (reservoirAmount) {
+      reservoirAmount.addEventListener("input", (event) => {
+        this._reservoirAmount = event.target.value;
+      });
+      reservoirAmount.addEventListener("click", (event) => event.stopPropagation());
+    }
+
+    const reservoirGuideDontShow = this.shadowRoot.querySelector('[data-action="reservoir-guide-dont-show"]');
+    if (reservoirGuideDontShow) {
+      reservoirGuideDontShow.addEventListener("change", (event) => {
+        this._reservoirGuideDontShow = Boolean(event.target.checked);
+      });
+      reservoirGuideDontShow.addEventListener("click", (event) => event.stopPropagation());
+    }
+
+    const wizardName = this.shadowRoot.querySelector('[data-action="plant-wizard-name"]');
+    if (wizardName) {
+      wizardName.addEventListener("input", (event) => {
+        this._plantWizardName = event.target.value;
+      });
+      wizardName.addEventListener("click", (event) => event.stopPropagation());
+    }
+
+    const wizardSearch = this.shadowRoot.querySelector('[data-action="plant-wizard-search"]');
+    if (wizardSearch) {
+      wizardSearch.addEventListener("input", (event) => {
+        this._plantWizardSearch = event.target.value;
+      });
+      wizardSearch.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          this._searchPlantCatalog();
+        }
+      });
+      wizardSearch.addEventListener("click", (event) => event.stopPropagation());
+    }
+
+    const wizardPhotoUrl = this.shadowRoot.querySelector('[data-action="plant-wizard-photo-url"]');
+    if (wizardPhotoUrl) {
+      wizardPhotoUrl.addEventListener("input", (event) => {
+        this._plantWizardPhotoUrl = event.target.value;
+      });
+      wizardPhotoUrl.addEventListener("click", (event) => event.stopPropagation());
+    }
+
+    const wizardChannel = this.shadowRoot.querySelector('[data-action="plant-wizard-channel"]');
+    if (wizardChannel) {
+      wizardChannel.addEventListener("change", (event) => {
+        this._plantWizardChannel = event.target.value;
+      });
+      wizardChannel.addEventListener("click", (event) => event.stopPropagation());
+    }
+
+    const wizardMode = this.shadowRoot.querySelector('[data-action="plant-wizard-mode"]');
+    if (wizardMode) {
+      wizardMode.addEventListener("change", (event) => {
+        this._plantWizardMode = event.target.value;
+        this._render();
+      });
+      wizardMode.addEventListener("click", (event) => event.stopPropagation());
+    }
+
+    const wizardAmount = this.shadowRoot.querySelector('[data-action="plant-wizard-amount"]');
+    if (wizardAmount) {
+      wizardAmount.addEventListener("input", (event) => {
+        this._plantWizardAmount = this._clamp(Number(event.target.value), 10, 500);
+      });
+      wizardAmount.addEventListener("click", (event) => event.stopPropagation());
+    }
+
+    const wizardIntervalDays = this.shadowRoot.querySelector('[data-action="plant-wizard-interval-days"]');
+    if (wizardIntervalDays) {
+      wizardIntervalDays.addEventListener("input", (event) => {
+        this._plantWizardIntervalDays = this._clamp(Number(event.target.value), 1, 10);
+      });
+      wizardIntervalDays.addEventListener("click", (event) => event.stopPropagation());
+    }
+
+    const wizardStartHour = this.shadowRoot.querySelector('[data-action="plant-wizard-start-hour"]');
+    if (wizardStartHour) {
+      wizardStartHour.addEventListener("input", (event) => {
+        this._plantWizardStartHour = this._clamp(Number(event.target.value), 0, 23);
+      });
+      wizardStartHour.addEventListener("click", (event) => event.stopPropagation());
+    }
+
+    const wizardStartMinute = this.shadowRoot.querySelector('[data-action="plant-wizard-start-minute"]');
+    if (wizardStartMinute) {
+      wizardStartMinute.addEventListener("input", (event) => {
+        this._plantWizardStartMinute = this._clamp(Number(event.target.value), 0, 59);
+      });
+      wizardStartMinute.addEventListener("click", (event) => event.stopPropagation());
+    }
+
+    const wizardStartTime = this.shadowRoot.querySelector('[data-action="plant-wizard-start-time"]');
+    if (wizardStartTime) {
+      wizardStartTime.addEventListener("input", (event) => {
+        const [hour, minute] = this._splitTime(event.target.value);
+        this._plantWizardStartHour = hour;
+        this._plantWizardStartMinute = minute;
+      });
+      wizardStartTime.addEventListener("click", (event) => event.stopPropagation());
+    }
+
+    const wizardSmartMin = this.shadowRoot.querySelector('[data-action="plant-wizard-smart-min"]');
+    if (wizardSmartMin) {
+      wizardSmartMin.addEventListener("input", (event) => {
+        this._plantWizardSmartMin = this._clamp(Number(event.target.value), 1, Math.max(1, this._plantWizardSmartMax - 1));
+      });
+      wizardSmartMin.addEventListener("click", (event) => event.stopPropagation());
+    }
+
+    const wizardSmartMax = this.shadowRoot.querySelector('[data-action="plant-wizard-smart-max"]');
+    if (wizardSmartMax) {
+      wizardSmartMax.addEventListener("input", (event) => {
+        this._plantWizardSmartMax = this._clamp(Number(event.target.value), Math.min(99, this._plantWizardSmartMin + 1), 99);
+      });
+      wizardSmartMax.addEventListener("click", (event) => event.stopPropagation());
+    }
+
+    const modeWizardAmount = this.shadowRoot.querySelector('[data-action="mode-wizard-amount"]');
+    if (modeWizardAmount) {
+      modeWizardAmount.addEventListener("input", (event) => {
+        this._modeWizardAmount = this._clamp(Number(event.target.value), 10, 500);
+      });
+      modeWizardAmount.addEventListener("click", (event) => event.stopPropagation());
+    }
+
+    const modeWizardIntervalDays = this.shadowRoot.querySelector('[data-action="mode-wizard-interval-days"]');
+    if (modeWizardIntervalDays) {
+      modeWizardIntervalDays.addEventListener("input", (event) => {
+        this._modeWizardIntervalDays = this._clamp(Number(event.target.value), 1, 10);
+      });
+      modeWizardIntervalDays.addEventListener("click", (event) => event.stopPropagation());
+    }
+
+    const modeWizardStartTime = this.shadowRoot.querySelector('[data-action="mode-wizard-start-time"]');
+    if (modeWizardStartTime) {
+      modeWizardStartTime.addEventListener("input", (event) => {
+        const [hour, minute] = this._splitTime(event.target.value);
+        this._modeWizardStartHour = hour;
+        this._modeWizardStartMinute = minute;
+      });
+      modeWizardStartTime.addEventListener("click", (event) => event.stopPropagation());
+    }
+
+    const modeWizardSmartMin = this.shadowRoot.querySelector('[data-action="mode-wizard-smart-min"]');
+    if (modeWizardSmartMin) {
+      modeWizardSmartMin.addEventListener("input", (event) => {
+        this._modeWizardSmartMin = this._clamp(Number(event.target.value), 1, Math.max(1, this._modeWizardSmartMax - 1));
+      });
+      modeWizardSmartMin.addEventListener("click", (event) => event.stopPropagation());
+    }
+
+    const modeWizardSmartMax = this.shadowRoot.querySelector('[data-action="mode-wizard-smart-max"]');
+    if (modeWizardSmartMax) {
+      modeWizardSmartMax.addEventListener("input", (event) => {
+        this._modeWizardSmartMax = this._clamp(Number(event.target.value), Math.min(99, this._modeWizardSmartMin + 1), 99);
+      });
+      modeWizardSmartMax.addEventListener("click", (event) => event.stopPropagation());
+    }
+
+    const dashboardGrid = this.shadowRoot.querySelector(".dashboard-grid");
+    if (dashboardGrid) {
+      dashboardGrid.addEventListener("click", () => {
+        if (this._deviceMenuOpen) {
+          this._deviceMenuOpen = false;
+          this._render();
+        }
+      });
+    }
+
+    this.shadowRoot.querySelectorAll("input[data-entity], select[data-entity]").forEach((element) => {
+      element.addEventListener("change", async (event) => {
+        const target = event.currentTarget;
+        const entityId = target.dataset.entity;
+        const domain = target.dataset.domain;
+        if (target.dataset.timePart) {
+          await this._setTimeParts(entityId);
+          return;
+        }
+        if (domain === "number") {
+          const min = Number(target.getAttribute("min"));
+          const max = Number(target.getAttribute("max"));
+          const value = this._clamp(
+            Number(target.value),
+            Number.isFinite(min) ? min : Number.MIN_SAFE_INTEGER,
+            Number.isFinite(max) ? max : Number.MAX_SAFE_INTEGER,
+          );
+          target.value = String(value);
+          await this._setNumber(entityId, value);
+        } else if (domain === "select") {
+          await this._setSelect(entityId, target.value);
+        } else if (domain === "time") {
+          await this._setTime(entityId, target.value);
+        } else if (domain === "text") {
+          await this._setText(entityId, target.value);
+        }
+      });
+    });
   }
 
-  _sanitize(value) {
-    return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  async _setTimeParts(entityId) {
+    const inputs = Array.from(this.shadowRoot.querySelectorAll("input[data-time-part]"));
+    const hourInput = inputs.find((input) => input.dataset.timePart === "hour" && input.dataset.entity === entityId);
+    const minuteInput = inputs.find((input) => input.dataset.timePart === "minute" && input.dataset.entity === entityId);
+    const hour = this._clamp(Number(hourInput?.value), 0, 23);
+    const minute = this._clamp(Number(minuteInput?.value), 0, 59);
+    if (hourInput) {
+      hourInput.value = String(hour);
+    }
+    if (minuteInput) {
+      minuteInput.value = String(minute);
+    }
+    await this._setTime(entityId, `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00`);
+  }
+
+  _splitTime(value) {
+    const match = String(value || "").match(/^(\d{1,2}):(\d{1,2})/);
+    if (!match) {
+      return [8, 0];
+    }
+    return [
+      this._clamp(Number(match[1]), 0, 23),
+      this._clamp(Number(match[2]), 0, 59),
+    ];
+  }
+
+  _plantWizardStartTime() {
+    const hour = this._clamp(Number(this._plantWizardStartHour), 0, 23);
+    const minute = this._clamp(Number(this._plantWizardStartMinute), 0, 59);
+    return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00`;
+  }
+
+  _clamp(value, min, max) {
+    if (!Number.isFinite(value)) {
+      return min;
+    }
+    return Math.min(max, Math.max(min, Math.round(value)));
   }
 
   _escape(value) {
     return String(value ?? "")
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;");
   }
 }
 
-customElements.define("growcube-card", GrowcubeCard);
+if (!customElements.get("growcube-card")) {
+  customElements.define("growcube-card", GrowcubeCard);
+}
 
 window.customCards = window.customCards || [];
 window.customCards.push({
   type: "growcube-card",
   name: "GrowCube Card",
-  description: "GrowCube MQTT dashboard card",
+  description: "A compact GrowCube plant control card",
 });
