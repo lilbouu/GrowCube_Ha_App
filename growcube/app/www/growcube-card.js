@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.8-addon-fallback-catalog";
+const GROWCUBE_CARD_VERSION = "0.2.9-addon-fallback-catalog";
 
 class GrowcubeCard extends HTMLElement {
   constructor() {

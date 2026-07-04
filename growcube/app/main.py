@@ -37,6 +37,7 @@ OPTIONS_PATH = DATA_DIR / "options.json"
 APP_DIR = Path(__file__).parent
 CARD_SOURCE_PATH = APP_DIR / "www" / "growcube-card.js"
 CARD_IMAGE_SOURCE_DIR = APP_DIR / "www" / "images"
+CARD_VERSION = "0.2.9"
 CARD_TARGET_PATHS = (
     Path("/homeassistant/www/growcube/growcube-card.js"),
     Path("/homeassistant_config/www/growcube/growcube-card.js"),
@@ -648,6 +649,9 @@ def install_lovelace_card() -> None:
             target_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(CARD_SOURCE_PATH, target_path)
             LOGGER.info("GrowCube Lovelace card copied to %s", target_path)
+            versioned_target_path = target_path.with_name(f"growcube-card-{CARD_VERSION}.js")
+            shutil.copyfile(CARD_SOURCE_PATH, versioned_target_path)
+            LOGGER.info("GrowCube Lovelace card copied to %s", versioned_target_path)
             if CARD_IMAGE_SOURCE_DIR.is_dir():
                 shutil.copytree(
                     CARD_IMAGE_SOURCE_DIR,
