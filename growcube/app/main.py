@@ -47,7 +47,7 @@ OPTIONS_PATH = DATA_DIR / "options.json"
 APP_DIR = Path(__file__).parent
 CARD_SOURCE_PATH = APP_DIR / "www" / "growcube-card.js"
 CARD_IMAGE_SOURCE_DIR = APP_DIR / "www" / "images"
-CARD_VERSION = "0.2.17"
+CARD_VERSION = "0.2.18"
 CARD_API_URL_PLACEHOLDER = "__GROWCUBE_ADDON_API_URL__"
 DEFAULT_INGRESS_PORT = 8099
 CLOUD_CATALOG_HOSTS = ("https://api.growcube.cc", "http://api.growcube.cc")
@@ -65,6 +65,12 @@ class ChannelConfig:
     configured: bool = False
     plant_name: str = ""
     photo_url: str = ""
+    type_category: str = ""
+    type_description: str = ""
+    temp_min: int = 0
+    temp_max: int = 0
+    air_humidity_min: int = 0
+    air_humidity_max: int = 0
     mode: str = "Disabled"
     manual_duration_seconds: int = 50
     duration_seconds: int = 10
@@ -228,6 +234,7 @@ class GrowCubeManager:
 
         with self.lock:
             channel_state = state.channels[channel]
+            config = channel_state.config
             return {
                 "device_id": mqtt_device_unique_id(self._state_to_dict(state)),
                 "channel": "abcd"[channel],
@@ -235,12 +242,12 @@ class GrowCubeManager:
                 "history_complete": channel_state.history_complete,
                 "watering_events_complete": channel_state.watering_events_complete,
                 "history_points": len(channel_state.history),
-                "type_category": "",
-                "type_description": "",
-                "temp_min": 0,
-                "temp_max": 0,
-                "air_humidity_min": 0,
-                "air_humidity_max": 0,
+                "type_category": config.type_category,
+                "type_description": config.type_description,
+                "temp_min": config.temp_min,
+                "temp_max": config.temp_max,
+                "air_humidity_min": config.air_humidity_min,
+                "air_humidity_max": config.air_humidity_max,
                 "history": channel_state.history,
                 "watering_events": channel_state.watering_events,
             }
@@ -426,6 +433,24 @@ class GrowCubeManager:
             if query_has(params, "photo_url"):
                 config.photo_url = first_query_value(params, "photo_url")[:512]
                 changed.append("photo_url updated")
+            if query_has(params, "type_category"):
+                config.type_category = first_query_value(params, "type_category")[:128]
+                changed.append("type_category updated")
+            if query_has(params, "type_description"):
+                config.type_description = first_query_value(params, "type_description")[:2048]
+                changed.append("type_description updated")
+            if query_has(params, "temp_min"):
+                config.temp_min = clamp_int(first_query_value(params, "temp_min"), -50, 100, config.temp_min)
+                changed.append(f"temp_min={config.temp_min}")
+            if query_has(params, "temp_max"):
+                config.temp_max = clamp_int(first_query_value(params, "temp_max"), -50, 100, config.temp_max)
+                changed.append(f"temp_max={config.temp_max}")
+            if query_has(params, "air_humidity_min"):
+                config.air_humidity_min = clamp_int(first_query_value(params, "air_humidity_min"), 0, 100, config.air_humidity_min)
+                changed.append(f"air_humidity_min={config.air_humidity_min}")
+            if query_has(params, "air_humidity_max"):
+                config.air_humidity_max = clamp_int(first_query_value(params, "air_humidity_max"), 0, 100, config.air_humidity_max)
+                changed.append(f"air_humidity_max={config.air_humidity_max}")
             if query_has(params, "mode"):
                 mode = first_query_value(params, "mode")
                 config.mode = mode if mode in {"Disabled", "Repeating", "Smart"} else "Disabled"
@@ -808,6 +833,12 @@ class GrowCubeManager:
                         configured=bool(config.get("configured", channel.plant_configured)),
                         plant_name=str(config.get("plant_name") or ""),
                         photo_url=str(config.get("photo_url") or ""),
+                        type_category=str(config.get("type_category") or ""),
+                        type_description=str(config.get("type_description") or ""),
+                        temp_min=clamp_int(config.get("temp_min"), -50, 100, 0),
+                        temp_max=clamp_int(config.get("temp_max"), -50, 100, 0),
+                        air_humidity_min=clamp_int(config.get("air_humidity_min"), 0, 100, 0),
+                        air_humidity_max=clamp_int(config.get("air_humidity_max"), 0, 100, 0),
                         mode=str(config.get("mode") or "Disabled"),
                         manual_duration_seconds=clamp_int(config.get("manual_duration_seconds"), 30, 150, 50),
                         duration_seconds=clamp_int(config.get("duration_seconds"), 10, 500, 10),
@@ -890,6 +921,12 @@ class GrowCubeManager:
                         "configured": channel.config.configured,
                         "plant_name": channel.config.plant_name,
                         "photo_url": channel.config.photo_url,
+                        "type_category": channel.config.type_category,
+                        "type_description": channel.config.type_description,
+                        "temp_min": channel.config.temp_min,
+                        "temp_max": channel.config.temp_max,
+                        "air_humidity_min": channel.config.air_humidity_min,
+                        "air_humidity_max": channel.config.air_humidity_max,
                         "mode": channel.config.mode,
                         "manual_duration_seconds": channel.config.manual_duration_seconds,
                         "duration_seconds": channel.config.duration_seconds,

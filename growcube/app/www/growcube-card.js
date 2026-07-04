@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.17-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.18-addon-compat";
 const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
@@ -23,6 +23,7 @@ class GrowcubeCard extends HTMLElement {
     this._deletePlantDialogOpen = false;
     this._aboutProfileCache = {};
     this._aboutProfileLoading = false;
+    this._addonApiUrlCache = undefined;
     this._plantWizardOpen = false;
     this._plantWizardStep = 0;
     this._plantWizardName = "";
@@ -196,7 +197,7 @@ class GrowcubeCard extends HTMLElement {
   }
 
   async _fetchAddonApi(path) {
-    const baseUrl = this._addonApiUrl();
+    const baseUrl = await this._addonApiUrl();
     if (!baseUrl) {
       return undefined;
     }
@@ -212,13 +213,85 @@ class GrowcubeCard extends HTMLElement {
     return response.json();
   }
 
-  _addonApiUrl() {
+  async _addonApiUrl() {
+    if (this._addonApiUrlCache) {
+      return this._addonApiUrlCache;
+    }
     const configured = this._config.addon_api_url || window.GROWCUBE_ADDON_API_URL || GROWCUBE_ADDON_API_URL || "";
     const value = String(configured || "").trim();
-    if (!value || value === "__GROWCUBE_ADDON_API_URL__") {
+    if (value && value !== "__GROWCUBE_ADDON_API_URL__") {
+      this._addonApiUrlCache = this._normalizeAddonApiUrl(value);
+      return this._addonApiUrlCache;
+    }
+    this._addonApiUrlCache = await this._discoverAddonApiUrl();
+    return this._addonApiUrlCache;
+  }
+
+  async _discoverAddonApiUrl() {
+    if (!this._hass?.callApi) {
       return "";
     }
-    return value.replace(/\/+$/, "");
+    const slugs = [
+      this._config.addon_slug,
+      window.GROWCUBE_ADDON_SLUG,
+      "growcube",
+      "local_growcube",
+    ].filter(Boolean);
+    for (const slug of [...new Set(slugs.map((item) => String(item).trim()).filter(Boolean))]) {
+      const url = await this._addonInfoUrl(slug);
+      if (url) {
+        return url;
+      }
+    }
+    try {
+      const result = await this._hass.callApi("GET", "hassio/addons");
+      const addons = Array.isArray(result?.data?.addons) ? result.data.addons : (Array.isArray(result?.addons) ? result.addons : []);
+      const match = addons.find((item) => {
+        const slug = String(item?.slug || "");
+        const name = String(item?.name || "");
+        return slug === "growcube" || slug.endsWith("_growcube") || name.toLowerCase() === "growcube";
+      });
+      if (match?.slug) {
+        const url = await this._addonInfoUrl(match.slug);
+        if (url) {
+          return url;
+        }
+      }
+    } catch (error) {
+      // Supervisor add-on discovery is unavailable for this frontend session.
+    }
+    return "";
+  }
+
+  async _addonInfoUrl(slug) {
+    try {
+      const result = await this._hass.callApi("GET", `hassio/addons/${encodeURIComponent(slug)}/info`);
+      const data = result?.data || result || {};
+      return this._normalizeAddonApiUrl(data.ingress_url || data.ingress_entry || data.ingress_path || "");
+    } catch (error) {
+      return "";
+    }
+  }
+
+  _normalizeAddonApiUrl(value) {
+    const text = String(value || "").trim();
+    if (!text || text === "__GROWCUBE_ADDON_API_URL__") {
+      return "";
+    }
+    if (/^https?:\/\//i.test(text)) {
+      try {
+        return new URL(text).pathname.replace(/\/+$/, "");
+      } catch (error) {
+        return "";
+      }
+    }
+    if (text.startsWith("/")) {
+      return text.replace(/\/+$/, "");
+    }
+    if (text.startsWith("api/hassio_ingress/")) {
+      return `/${text.replace(/\/+$/, "")}`;
+    }
+    return `/api/hassio_ingress/${text.replace(/^\/+|\/+$/g, "")}`;
   }
 
   _discoverMqttDashboardDevices() {
@@ -1299,7 +1372,40 @@ class GrowcubeCard extends HTMLElement {
   async _confirmAddPlant() {
     const channel = this._plantWizardChannel || this._firstAvailableChannel();
     const entities = this._entities(channel);
+    const mode = this._normalizeMode(this._plantWizardMode || "Disabled");
+    const profile = this._plantWizardSelected || {};
+    const values = {
+      configured: true,
+      plant_name: this._plantWizardName.trim(),
+      photo_url: this._plantWizardPhotoUrl.trim(),
+      type_category: profile.category || "",
+      type_description: profile.description || "",
+      temp_min: Number(profile.temp_min) || 0,
+      temp_max: Number(profile.temp_max) || 0,
+      air_humidity_min: Number(profile.air_humidity_min) || 0,
+      air_humidity_max: Number(profile.air_humidity_max) || 0,
+      mode,
+      first_watering_time: this._plantWizardStartTime(),
+      amount_ml: this._plantWizardAmount,
+      interval_hours: this._plantWizardIntervalDays * 24,
+      smart_min_moisture: this._plantWizardSmartMin,
+      smart_max_moisture: this._plantWizardSmartMax,
+      smart_daytime_watering: this._plantWizardDaytime,
+    };
     try {
+      let apiResult;
+      try {
+        apiResult = await this._configureChannelApi(channel, values, mode === "Smart" || mode === "Repeating");
+      } catch (error) {
+        apiResult = undefined;
+      }
+      if (apiResult) {
+        this._plantWizardOpen = false;
+        this._showToast("Plant added");
+        this._navigateToChannel(channel);
+        this._render();
+        return;
+      }
       if (entities.name && this._plantWizardName.trim()) {
         await this._setText(entities.name, this._plantWizardName.trim());
       }
@@ -1307,7 +1413,7 @@ class GrowcubeCard extends HTMLElement {
         await this._setText(entities.photo_url, this._plantWizardPhotoUrl.trim());
       }
       if (entities.mode) {
-        await this._setSelect(entities.mode, this._normalizeMode(this._plantWizardMode || "Disabled"));
+        await this._setSelect(entities.mode, mode);
       }
       if (this._plantWizardMode === "Smart") {
         if (entities.smart_min_moisture) {
@@ -1333,26 +1439,8 @@ class GrowcubeCard extends HTMLElement {
       if (entities.add_plant) {
         await this._press(entities.add_plant);
       }
-      if (this._plantWizardMode === "Smart" || this._plantWizardMode === "Repeating") {
-        const result = await this._configureChannelApi(channel, {
-          configured: true,
-          plant_name: this._plantWizardName.trim(),
-          photo_url: this._plantWizardPhotoUrl.trim(),
-          mode: this._normalizeMode(this._plantWizardMode),
-          first_watering_time: this._plantWizardStartTime(),
-          amount_ml: this._plantWizardAmount,
-          interval_hours: this._plantWizardIntervalDays * 24,
-          smart_min_moisture: this._plantWizardSmartMin,
-          smart_max_moisture: this._plantWizardSmartMax,
-          smart_daytime_watering: this._plantWizardDaytime,
-        }, true);
-        if (!result) {
-          if (entities.save) {
-            await this._press(entities.save);
-          } else {
-            await this._applyWateringApi(channel);
-          }
-        }
+      if ((mode === "Smart" || mode === "Repeating") && entities.save) {
+        await this._press(entities.save);
       }
       this._plantWizardOpen = false;
       this._showToast("Plant added");
