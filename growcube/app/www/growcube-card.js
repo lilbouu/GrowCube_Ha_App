@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.21-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.23-addon-compat";
 const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
@@ -204,6 +204,7 @@ class GrowcubeCard extends HTMLElement {
     }
     const url = `${baseUrl}/${String(path).replace(/^\/+/, "")}`;
     console.info("[GrowCube] add-on API request", { url });
+    const started = performance.now();
     const response = await fetch(url, {
       credentials: "same-origin",
       headers: {
@@ -215,7 +216,7 @@ class GrowcubeCard extends HTMLElement {
       throw new Error(`GrowCube add-on API failed: ${response.status} ${response.statusText}: ${body.slice(0, 240)}`);
     }
     const result = await response.json();
-    console.info("[GrowCube] add-on API response", { url, keys: Object.keys(result || {}) });
+    console.info("[GrowCube] add-on API response", { url, elapsedMs: Math.round(performance.now() - started), keys: Object.keys(result || {}) });
     return result;
   }
 
@@ -1610,7 +1611,7 @@ class GrowcubeCard extends HTMLElement {
       name: String(plant?.name || ""),
       display_name: String(plant?.display_name || plant?.name || ""),
       category: String(plant?.category || ""),
-      description: String(plant?.description || ""),
+      description: this._truncateText(String(plant?.description || ""), 420),
       image_url: String(plant?.image || ""),
       moisture_min: this._clamp(Number(plant?.min_soil_moist) || 30, 0, 100),
       moisture_max: this._clamp(Number(plant?.max_soil_moist) || 60, 0, 100),
@@ -1722,6 +1723,14 @@ class GrowcubeCard extends HTMLElement {
 
   _normalizeProfileText(value) {
     return String(value || "").trim();
+  }
+
+  _truncateText(value, limit) {
+    const text = String(value || "").trim();
+    if (text.length <= limit) {
+      return text;
+    }
+    return `${text.slice(0, limit).trimEnd()}...`;
   }
 
   _profileHasDetails(profile) {

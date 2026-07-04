@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
@@ -11,6 +12,7 @@ import logging
 import os
 import shutil
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -48,11 +50,15 @@ OPTIONS_PATH = DATA_DIR / "options.json"
 APP_DIR = Path(__file__).parent
 CARD_SOURCE_PATH = APP_DIR / "www" / "growcube-card.js"
 CARD_IMAGE_SOURCE_DIR = APP_DIR / "www" / "images"
-CARD_VERSION = "0.2.21"
+CARD_VERSION = "0.2.23"
 CARD_API_URL_PLACEHOLDER = "__GROWCUBE_ADDON_API_URL__"
 DEFAULT_INGRESS_PORT = 8099
 CLOUD_CATALOG_HOSTS = ("https://api.growcube.cc", "http://api.growcube.cc")
 CLOUD_CATALOG_LIMIT = 40
+CLOUD_CATALOG_TIMEOUT_SECONDS = 45
+PLANT_DESCRIPTION_LIMIT = 420
+_PLANT_SEARCH_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+PLANT_SEARCH_CACHE_TTL_SECONDS = 15 * 60
 _SUPERVISOR_INGRESS_URL_CACHE: str | None = None
 CARD_TARGET_PATHS = (
     Path("/homeassistant/www/growcube/growcube-card.js"),
@@ -1218,13 +1224,28 @@ def search_plants(query: str) -> list[dict[str, Any]]:
     query = query.strip()
     if len(query) < 2:
         return []
+    cache_key = query.casefold()
+    cached = _PLANT_SEARCH_CACHE.get(cache_key)
+    now = time.monotonic()
+    if cached is not None and now - cached[0] < PLANT_SEARCH_CACHE_TTL_SECONDS:
+        LOGGER.info("Plant search cache hit query=%r results=%s", query, len(cached[1]))
+        return cached[1]
     LOGGER.info("Searching GrowCube cloud catalog for %r", query)
-    data = fetch_catalog_json(f"/api/en/plants/name/{quote(query, safe='')}")
+    try:
+        data = fetch_catalog_json(f"/api/en/plants/name/{quote(query, safe='')}")
+    except Exception:
+        if cached is not None:
+            LOGGER.warning("Plant search cloud failed; returning stale cache query=%r results=%s", query, len(cached[1]))
+            return cached[1]
+        raise
     plants = data.get("plants")
     if not isinstance(plants, list):
         LOGGER.warning("GrowCube cloud catalog returned no plants list for query=%r keys=%s", query, sorted(data.keys()))
         return []
-    return [plant_from_api(plant) for plant in plants[:CLOUD_CATALOG_LIMIT] if isinstance(plant, dict)]
+    result = [plant_from_api(plant) for plant in plants[:CLOUD_CATALOG_LIMIT] if isinstance(plant, dict)]
+    _PLANT_SEARCH_CACHE[cache_key] = (now, result)
+    LOGGER.info("Plant search cache stored query=%r results=%s", query, len(result))
+    return result
 
 
 def fetch_catalog_json(path: str) -> dict[str, Any]:
@@ -1234,18 +1255,25 @@ def fetch_catalog_json(path: str) -> dict[str, Any]:
             f"{host}{path}",
             headers={
                 "Accept": "application/json",
+                "Accept-Encoding": "gzip",
                 "User-Agent": "GrowCube/4.1",
             },
         )
         try:
             LOGGER.info("GrowCube cloud catalog request url=%s%s", host, path)
-            with urlopen(request, timeout=15) as response:
-                data = json.loads(response.read().decode("utf-8"))
+            started = time.monotonic()
+            with urlopen(request, timeout=CLOUD_CATALOG_TIMEOUT_SECONDS) as response:
+                body = response.read()
+                if response.headers.get("Content-Encoding", "").lower() == "gzip":
+                    body = gzip.decompress(body)
+                data = json.loads(body.decode("utf-8"))
                 LOGGER.info(
-                    "GrowCube cloud catalog response url=%s%s status=%s keys=%s",
+                    "GrowCube cloud catalog response url=%s%s status=%s bytes=%s elapsed_ms=%s keys=%s",
                     host,
                     path,
                     response.status,
+                    len(body),
+                    round((time.monotonic() - started) * 1000),
                     sorted(data.keys()) if isinstance(data, dict) else type(data).__name__,
                 )
                 return data if isinstance(data, dict) else {}
@@ -1263,7 +1291,7 @@ def plant_from_api(plant: dict[str, Any]) -> dict[str, Any]:
         "name": str_or_empty(plant.get("name")),
         "display_name": str_or_empty(plant.get("display_name")),
         "category": str_or_empty(plant.get("category")),
-        "description": str_or_empty(plant.get("description")),
+        "description": truncate_text(str_or_empty(plant.get("description")), PLANT_DESCRIPTION_LIMIT),
         "image_url": str_or_empty(plant.get("image")),
         "moisture_min": clamp_int(plant.get("min_soil_moist"), 0, 100, 30),
         "moisture_max": clamp_int(plant.get("max_soil_moist"), 0, 100, 60),
@@ -1276,6 +1304,13 @@ def plant_from_api(plant: dict[str, Any]) -> dict[str, Any]:
 
 def str_or_empty(value: Any) -> str:
     return value if isinstance(value, str) else ""
+
+
+def truncate_text(value: str, limit: int) -> str:
+    text = value.strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit].rstrip()}..."
 
 
 def dashboard_device_entities(device_id: str) -> dict[str, str]:
