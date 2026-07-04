@@ -106,11 +106,21 @@ The add-on copies its Lovelace card to:
 /config/www/growcube/growcube-card.js
 ```
 
+The GrowCube add-on log should contain:
+
+```text
+GrowCube Lovelace card copied to /config/www/growcube/growcube-card.js
+```
+
 Home Assistant serves that file as:
 
 ```text
 /local/growcube/growcube-card.js
 ```
+
+If this URL returns `404 Not Found`, check that the log line above is present.
+If `/config/www` did not exist before, restart Home Assistant Core once so the
+`/local` static path is picked up.
 
 Add it as a Lovelace resource:
 

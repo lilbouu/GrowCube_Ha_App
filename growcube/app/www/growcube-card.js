@@ -10,6 +10,9 @@ class GrowcubeMqttCard extends HTMLElement {
     this._config = {
       title: "GrowCube",
       device: "",
+      channel: "",
+      detail: false,
+      overview: "",
       ...config,
     };
     this._render();
@@ -99,6 +102,10 @@ class GrowcubeMqttCard extends HTMLElement {
       stop: this._entity("button", `stop_watering_${id}`),
       history: this._entity("button", `load_history_${id}`),
     }));
+    const selectedChannel = this._selectedChannel();
+    const visibleChannels = selectedChannel
+      ? channels.filter((channel) => channel.id === selectedChannel)
+      : channels;
 
     this.shadowRoot.innerHTML = `
       <style>
@@ -260,7 +267,7 @@ class GrowcubeMqttCard extends HTMLElement {
               ${this._metric("Water warning", waterWarning, true)}
             </div>
             <div class="channels">
-              ${channels.map((channel) => this._channel(channel)).join("")}
+              ${visibleChannels.map((channel) => this._channel(channel)).join("")}
             </div>
           ` : `
             <div class="empty">
@@ -271,11 +278,23 @@ class GrowcubeMqttCard extends HTMLElement {
       </ha-card>
     `;
 
-    channels.forEach((channel) => {
+    visibleChannels.forEach((channel) => {
       this.shadowRoot.getElementById(`water-${channel.id}`)?.addEventListener("click", () => this._callButton(channel.water));
       this.shadowRoot.getElementById(`stop-${channel.id}`)?.addEventListener("click", () => this._callButton(channel.stop));
       this.shadowRoot.getElementById(`history-${channel.id}`)?.addEventListener("click", () => this._callButton(channel.history));
     });
+  }
+
+  _selectedChannel() {
+    const value = String(this._config.channel || "").toLowerCase().trim();
+    if (!value) {
+      return "";
+    }
+    if (["a", "b", "c", "d"].includes(value)) {
+      return value;
+    }
+    const match = value.match(/[abcd]$/);
+    return match ? match[0] : "";
   }
 
   _metric(label, entityId, binary = false) {

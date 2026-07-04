@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -33,6 +34,9 @@ LOGGER = logging.getLogger("growcube-addon")
 DATA_DIR = Path(os.environ.get("GROWCUBE_DATA_DIR", "/data"))
 STATE_PATH = DATA_DIR / "growcube_state.json"
 OPTIONS_PATH = DATA_DIR / "options.json"
+APP_DIR = Path(__file__).parent
+CARD_SOURCE_PATH = APP_DIR / "www" / "growcube-card.js"
+CARD_TARGET_PATH = Path("/config/www/growcube/growcube-card.js")
 CHANNEL_NAMES = ("A", "B", "C", "D")
 
 
@@ -441,10 +445,23 @@ def mqtt_options() -> MqttOptions:
     )
 
 
+def install_lovelace_card() -> None:
+    if not CARD_SOURCE_PATH.is_file():
+        LOGGER.warning("GrowCube Lovelace card source is missing: %s", CARD_SOURCE_PATH)
+        return
+    try:
+        CARD_TARGET_PATH.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(CARD_SOURCE_PATH, CARD_TARGET_PATH)
+        LOGGER.info("GrowCube Lovelace card copied to %s", CARD_TARGET_PATH)
+    except OSError as err:
+        LOGGER.warning("Could not copy GrowCube Lovelace card to %s: %s", CARD_TARGET_PATH, err)
+
+
 manager = GrowCubeManager()
 
 
 def main() -> None:
+    install_lovelace_card()
     manager.load()
     manager.start_loop()
     manager.mqtt_bridge = MqttBridge(mqtt_options(), manager.handle_mqtt_command)

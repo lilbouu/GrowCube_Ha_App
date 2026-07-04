@@ -2,7 +2,53 @@ title: GrowCube
 views:
   - title: GrowCube
     path: growcube
+    panel: true
     icon: mdi:sprout
     cards:
       - type: custom:growcube-card
         title: GrowCube
+        overview: dashboard
+
+  - title: Plant A
+    path: growcube-plant-a
+    subview: true
+    panel: true
+    cards:
+      - type: custom:growcube-card
+        title: Plant A
+        name: Plant A
+        channel: Channel A
+        detail: true
+
+  - title: Plant B
+    path: growcube-plant-b
+    subview: true
+    panel: true
+    cards:
+      - type: custom:growcube-card
+        title: Plant B
+        name: Plant B
+        channel: Channel B
+        detail: true
+
+  - title: Plant C
+    path: growcube-plant-c
+    subview: true
+    panel: true
+    cards:
+      - type: custom:growcube-card
+        title: Plant C
+        name: Plant C
+        channel: Channel C
+        detail: true
+
+  - title: Plant D
+    path: growcube-plant-d
+    subview: true
+    panel: true
+    cards:
+      - type: custom:growcube-card
+        title: Plant D
+        name: Plant D
+        channel: Channel D
+        detail: true
