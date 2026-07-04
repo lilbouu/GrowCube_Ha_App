@@ -47,7 +47,7 @@ OPTIONS_PATH = DATA_DIR / "options.json"
 APP_DIR = Path(__file__).parent
 CARD_SOURCE_PATH = APP_DIR / "www" / "growcube-card.js"
 CARD_IMAGE_SOURCE_DIR = APP_DIR / "www" / "images"
-CARD_VERSION = "0.2.16"
+CARD_VERSION = "0.2.17"
 CARD_API_URL_PLACEHOLDER = "__GROWCUBE_ADDON_API_URL__"
 DEFAULT_INGRESS_PORT = 8099
 CLOUD_CATALOG_HOSTS = ("https://api.growcube.cc", "http://api.growcube.cc")
@@ -259,6 +259,28 @@ class GrowCubeManager:
             "mode": state.channels[channel].config.mode,
         }
 
+    def configure_channel_payload(self, device_id: str, channel_value: str, params: dict[str, list[str]]) -> dict[str, Any]:
+        channel = validate_channel_key(channel_value)
+        state = self.find_device(device_id) if device_id else next(iter(self.devices.values()), None)
+        if state is None:
+            raise KeyError("device not found")
+        apply_config = query_bool(params, "apply", False)
+        future = self.submit(self.configure_channel(state.id, channel, params, apply_config))
+        future.result(timeout=5)
+        config = state.channels[channel].config
+        return {
+            "ok": True,
+            "device_id": mqtt_device_unique_id(self._state_to_dict(state)),
+            "channel": "abcd"[channel],
+            "mode": config.mode,
+            "first_watering_time": config.first_watering_time,
+            "amount_ml": config.amount_ml,
+            "interval_hours": config.interval_hours,
+            "smart_min_moisture": config.smart_min_moisture,
+            "smart_max_moisture": config.smart_max_moisture,
+            "smart_daytime_watering": config.smart_daytime_watering,
+        }
+
     def _dashboard_device(self, state: DeviceState) -> dict[str, Any]:
         device = self._state_to_dict(state)
         device_id = mqtt_device_unique_id(device)
@@ -383,6 +405,82 @@ class GrowCubeManager:
         else:
             LOGGER.info("Disable watering device=%s channel=%s", self.devices[device_id].host, CHANNEL_NAMES[channel])
             await runtime.client.send(Command(49, watering_mode_payload(channel, 0, 0, 0)))
+
+    async def configure_channel(
+        self,
+        device_id: str,
+        channel: int,
+        params: dict[str, list[str]],
+        apply_config: bool,
+    ) -> None:
+        channel = validate_channel(channel)
+        async with self.async_lock:
+            state = self.devices[device_id]
+            channel_state = state.channels[channel]
+            config = channel_state.config
+            changed: list[str] = []
+
+            if query_has(params, "plant_name"):
+                config.plant_name = first_query_value(params, "plant_name")[:64]
+                changed.append(f"plant_name={config.plant_name!r}")
+            if query_has(params, "photo_url"):
+                config.photo_url = first_query_value(params, "photo_url")[:512]
+                changed.append("photo_url updated")
+            if query_has(params, "mode"):
+                mode = first_query_value(params, "mode")
+                config.mode = mode if mode in {"Disabled", "Repeating", "Smart"} else "Disabled"
+                changed.append(f"mode={config.mode}")
+            if query_has(params, "amount_ml"):
+                config.amount_ml = clamp_int(first_query_value(params, "amount_ml"), 10, 500, config.amount_ml)
+                config.duration_seconds = config.amount_ml
+                changed.append(f"amount_ml={config.amount_ml}")
+            if query_has(params, "duration_seconds"):
+                config.amount_ml = clamp_int(first_query_value(params, "duration_seconds"), 10, 500, config.amount_ml)
+                config.duration_seconds = config.amount_ml
+                changed.append(f"amount_ml={config.amount_ml}")
+            if query_has(params, "interval_hours"):
+                config.interval_hours = clamp_int(first_query_value(params, "interval_hours"), 1, 240, config.interval_hours)
+                changed.append(f"interval_hours={config.interval_hours}")
+            if query_has(params, "first_watering_time"):
+                config.first_watering_time = normalize_time(
+                    first_query_value(params, "first_watering_time"),
+                    config.first_watering_time,
+                )
+                changed.append(f"first_watering_time={config.first_watering_time}")
+            if query_has(params, "smart_min_moisture"):
+                config.smart_min_moisture = clamp_int(
+                    first_query_value(params, "smart_min_moisture"),
+                    1,
+                    max(1, config.smart_max_moisture - 1),
+                    config.smart_min_moisture,
+                )
+                changed.append(f"smart_min={config.smart_min_moisture}")
+            if query_has(params, "smart_max_moisture"):
+                config.smart_max_moisture = clamp_int(
+                    first_query_value(params, "smart_max_moisture"),
+                    min(99, config.smart_min_moisture + 1),
+                    99,
+                    config.smart_max_moisture,
+                )
+                changed.append(f"smart_max={config.smart_max_moisture}")
+            if query_has(params, "smart_daytime_watering"):
+                config.smart_daytime_watering = query_bool(params, "smart_daytime_watering", config.smart_daytime_watering)
+                changed.append(f"smart_daytime={config.smart_daytime_watering}")
+            if query_bool(params, "configured", False) or config.plant_name or config.mode != "Disabled":
+                channel_state.plant_configured = True
+                config.configured = True
+
+            LOGGER.info(
+                "Direct channel config device=%s channel=%s apply=%s %s",
+                state.host,
+                CHANNEL_NAMES[channel],
+                apply_config,
+                ", ".join(changed) if changed else "no changes",
+            )
+            self.touch_locked(state)
+
+        if apply_config:
+            await self.apply_watering_config(device_id, channel)
 
     async def handle_mqtt_command(self, device_key: str, topic_key: str, payload: str) -> None:
         state = self.find_device(device_key)
@@ -984,6 +1082,14 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
                         first_query_value(params, "channel") or "a",
                     )
                 )
+            elif parsed.path == "/channel/config":
+                self._write_json(
+                    manager.configure_channel_payload(
+                        first_query_value(params, "device_id"),
+                        first_query_value(params, "channel") or "a",
+                        params,
+                    )
+                )
             else:
                 self._write_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
         except KeyError as err:
@@ -1023,6 +1129,16 @@ def start_ingress_api_server() -> ThreadingHTTPServer:
 def first_query_value(params: dict[str, list[str]], key: str) -> str:
     values = params.get(key) or []
     return str(values[0]).strip() if values else ""
+
+
+def query_has(params: dict[str, list[str]], key: str) -> bool:
+    return key in params
+
+
+def query_bool(params: dict[str, list[str]], key: str, fallback: bool) -> bool:
+    if not query_has(params, key):
+        return fallback
+    return first_query_value(params, key).lower() in {"1", "true", "yes", "on"}
 
 
 def search_plants(query: str) -> list[dict[str, Any]]:
