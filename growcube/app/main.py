@@ -36,7 +36,11 @@ STATE_PATH = DATA_DIR / "growcube_state.json"
 OPTIONS_PATH = DATA_DIR / "options.json"
 APP_DIR = Path(__file__).parent
 CARD_SOURCE_PATH = APP_DIR / "www" / "growcube-card.js"
-CARD_TARGET_PATH = Path("/config/www/growcube/growcube-card.js")
+CARD_TARGET_PATHS = (
+    Path("/homeassistant/www/growcube/growcube-card.js"),
+    Path("/homeassistant_config/www/growcube/growcube-card.js"),
+    Path("/config/www/growcube/growcube-card.js"),
+)
 CHANNEL_NAMES = ("A", "B", "C", "D")
 
 
@@ -449,12 +453,20 @@ def install_lovelace_card() -> None:
     if not CARD_SOURCE_PATH.is_file():
         LOGGER.warning("GrowCube Lovelace card source is missing: %s", CARD_SOURCE_PATH)
         return
-    try:
-        CARD_TARGET_PATH.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(CARD_SOURCE_PATH, CARD_TARGET_PATH)
-        LOGGER.info("GrowCube Lovelace card copied to %s", CARD_TARGET_PATH)
-    except OSError as err:
-        LOGGER.warning("Could not copy GrowCube Lovelace card to %s: %s", CARD_TARGET_PATH, err)
+    copied = False
+    for target_path in CARD_TARGET_PATHS:
+        if not target_path.parent.parent.exists():
+            LOGGER.info("Skipping GrowCube Lovelace card install path %s; base directory is not mounted", target_path)
+            continue
+        try:
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(CARD_SOURCE_PATH, target_path)
+            LOGGER.info("GrowCube Lovelace card copied to %s", target_path)
+            copied = True
+        except OSError as err:
+            LOGGER.warning("Could not copy GrowCube Lovelace card to %s: %s", target_path, err)
+    if not copied:
+        LOGGER.warning("GrowCube Lovelace card was not installed; Home Assistant config directory is not mounted")
 
 
 manager = GrowCubeManager()
