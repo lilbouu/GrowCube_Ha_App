@@ -48,7 +48,7 @@ class MqttClient:
         await self.writer.drain()
         packet_type, body = await self.read_packet()
         if packet_type != 0x20 or len(body) < 2 or body[1] != 0:
-            raise RuntimeError(f"MQTT connection failed: {body.hex()}")
+            raise RuntimeError(mqtt_connack_error(body))
 
     async def disconnect(self) -> None:
         if self.writer is None:
@@ -97,9 +97,10 @@ class MqttBridge:
     async def run_forever(self, snapshot_provider) -> None:
         while True:
             try:
-                self.client = MqttClient(self.options)
-                await self.client.connect()
-                await self.client.subscribe("growcube/+/+/set")
+                client = MqttClient(self.options)
+                await client.connect()
+                await client.subscribe("growcube/+/+/set")
+                self.client = client
                 await self.publish_all(snapshot_provider())
                 LOGGER.info("Connected to MQTT at %s:%s", self.options.host, self.options.port)
                 await self._read_loop()
@@ -124,7 +125,9 @@ class MqttBridge:
                 continue
 
     async def publish_all(self, snapshot: dict) -> None:
-        for device in snapshot.get("devices", []):
+        devices = snapshot.get("devices", [])
+        LOGGER.info("Publishing MQTT Discovery for %s GrowCube device(s)", len(devices))
+        for device in devices:
             await self.publish_device(device)
 
     async def publish_device(self, device: dict) -> None:
@@ -132,6 +135,7 @@ class MqttBridge:
             return
         unique_id = _device_unique_id(device)
         if unique_id not in self._published_discovery:
+            LOGGER.info("Publishing MQTT Discovery configs for GrowCube device %s", unique_id)
             await self._publish_discovery(device, unique_id)
             self._published_discovery.add(unique_id)
         await self._publish_state(device, unique_id)
@@ -253,6 +257,7 @@ class MqttBridge:
         availability = "online" if device.get("connected") else "offline"
         await self.client.publish(f"{base}/availability", availability, retain=True)
         await self.client.publish(f"{base}/state", json.dumps(device, separators=(",", ":")), retain=True)
+        LOGGER.info("Published MQTT state for GrowCube device %s (%s)", unique_id, availability)
 
 
 def _device_unique_id(device: dict) -> str:
@@ -263,6 +268,22 @@ def _device_unique_id(device: dict) -> str:
 def _encode_string(value: str) -> bytes:
     data = value.encode("utf-8")
     return struct.pack("!H", len(data)) + data
+
+
+def mqtt_connack_error(body: bytes) -> str:
+    if len(body) < 2:
+        return f"MQTT connection failed: malformed CONNACK {body.hex()}"
+    reason = {
+        1: "unacceptable protocol version",
+        2: "identifier rejected",
+        3: "server unavailable",
+        4: "bad username or password",
+        5: "not authorized",
+    }.get(body[1], f"unknown return code {body[1]}")
+    hint = ""
+    if body[1] in (4, 5):
+        hint = "; set mqtt_username/mqtt_password in the GrowCube add-on configuration"
+    return f"MQTT connection failed: {reason} ({body.hex()}){hint}"
 
 
 def _encode_remaining_length(value: int) -> bytes:

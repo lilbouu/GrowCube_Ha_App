@@ -32,6 +32,8 @@ The first add-on version includes:
 - moisture sensors for channels A-D
 - pump/water warning binary sensors
 - manual watering, stop, and history buttons for channels A-D
+- custom Lovelace card copied to `/config/www/growcube/growcube-card.js`
+- portable dashboard YAML in `docs/lovelace-growcube-mqtt-dashboard.yaml`
 
 ## Install In HAOS
 
@@ -51,6 +53,17 @@ Assistant GrowCube custom integration to be installed.
 MQTT must be available in Home Assistant. The default configuration expects the
 official Mosquitto broker add-on at `core-mosquitto`.
 
+If the add-on log shows `MQTT connection failed: not authorized (0005)`, create
+or choose a Home Assistant user for MQTT access and set those credentials in the
+GrowCube add-on configuration:
+
+```yaml
+mqtt_host: core-mosquitto
+mqtt_port: 1883
+mqtt_username: growcube_mqtt
+mqtt_password: your-password
+```
+
 ## Repository Layout
 
 ```text
@@ -65,6 +78,70 @@ growcube/
     growcube_client.py
     growcube_protocol.py
     mqtt_bridge.py
+    www/
+      growcube-card.js
+docs/
+  lovelace-growcube-mqtt-dashboard.yaml
+```
+
+## Updating The Add-on
+
+Do not uninstall the add-on just to update it. Uninstalling can remove add-on
+data.
+
+After pushing a new version to GitHub:
+
+1. Open **Settings -> Add-ons -> Add-on Store**.
+2. Open the menu and reload repositories, or open the GrowCube add-on page and
+   use the available update/rebuild action.
+3. Restart the GrowCube add-on.
+
+The add-on configuration and stored state under `/data` should remain in place.
+
+## Dashboard
+
+The add-on copies its Lovelace card to:
+
+```text
+/config/www/growcube/growcube-card.js
+```
+
+Home Assistant serves that file as:
+
+```text
+/local/growcube/growcube-card.js
+```
+
+Add it as a Lovelace resource:
+
+1. Open **Settings -> Dashboards**.
+2. Open the three-dot menu and choose **Resources**.
+3. Add a JavaScript module resource:
+
+```text
+/local/growcube/growcube-card.js
+```
+
+Then create or edit a dashboard and add a manual card:
+
+```yaml
+type: custom:growcube-card
+title: GrowCube
+```
+
+You can also import the portable dashboard YAML from:
+
+```text
+docs/lovelace-growcube-mqtt-dashboard.yaml
+```
+
+The card auto-detects the MQTT entities created by this add-on. If multiple
+GrowCube devices are present, pass the sanitized device host explicitly:
+
+```yaml
+type: custom:growcube-card
+title: GrowCube Office
+device: 192_168_1_50
 ```
 
 ## Notes

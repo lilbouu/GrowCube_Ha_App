@@ -130,6 +130,7 @@ class GrowCubeManager:
                 state = self._state_from_dict(item)
                 if state.host:
                     self.devices[state.id] = state
+            LOGGER.info("Loaded %s GrowCube device(s) from add-on configuration", len(self.devices))
 
     def start_loop(self) -> None:
         self.loop = asyncio.new_event_loop()

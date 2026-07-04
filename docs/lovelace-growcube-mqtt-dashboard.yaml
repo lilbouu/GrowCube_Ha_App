@@ -1,0 +1,8 @@
+title: GrowCube
+views:
+  - title: GrowCube
+    path: growcube
+    icon: mdi:sprout
+    cards:
+      - type: custom:growcube-card
+        title: GrowCube
