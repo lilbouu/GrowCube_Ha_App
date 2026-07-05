@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.42
+
+- Bump the add-on metadata to match the updated Lovelace card asset version.
+- Include the latest plant image rendering changes in the installable add-on update.
+
 ## 0.2.41
 
 - Use relative Web UI API requests so Home Assistant ingress routes dashboard and discovery calls back to the add-on.
