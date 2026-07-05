@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.45
+
+- Keep GrowCube discovery from failing when a probe connection is reset by a device or emulator during TCP close.
+- Ignore per-host discovery probe errors so one bad scan target no longer makes `/devices/discover` return 500.
+
 ## 0.2.44
 
 - Handle GrowCube watering exception, outlet blocked, sensor disconnected, device lock, and watering locked reports like the HACS integration.

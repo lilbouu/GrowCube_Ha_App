@@ -606,12 +606,15 @@ class GrowCubeManager:
 
         async def check_host(host: str) -> None:
             async with semaphore:
-                if not await tcp_port_open(host, 8800, DISCOVERY_PORT_TIMEOUT_SECONDS):
-                    return
-                device = await probe_growcube_device(host)
-                if device is None:
-                    return
-                found[device["device_id"] or host] = device
+                try:
+                    if not await tcp_port_open(host, 8800, DISCOVERY_PORT_TIMEOUT_SECONDS):
+                        return
+                    device = await probe_growcube_device(host)
+                    if device is None:
+                        return
+                    found[device["device_id"] or host] = device
+                except Exception as err:
+                    LOGGER.debug("GrowCube discovery probe ignored host=%s error=%s", host, err)
 
         await asyncio.gather(
             *[

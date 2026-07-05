@@ -111,13 +111,13 @@ The GrowCube add-on log should contain:
 
 ```text
 GrowCube Lovelace card copied to /homeassistant/www/growcube/growcube-card.js
-GrowCube Lovelace card copied to /homeassistant/www/growcube/growcube-card-0.2.44.js
+GrowCube Lovelace card copied to /homeassistant/www/growcube/growcube-card-0.2.45.js
 ```
 
 Home Assistant serves that file as:
 
 ```text
-/local/growcube/growcube-card-0.2.44.js
+/local/growcube/growcube-card-0.2.45.js
 ```
 
 If this URL returns `404 Not Found`, check that the log line above is present.
@@ -131,7 +131,7 @@ Add it as a Lovelace resource:
 3. Add a JavaScript module resource:
 
 ```text
-/local/growcube/growcube-card-0.2.44.js
+/local/growcube/growcube-card-0.2.45.js
 ```
 
 Then create or edit a dashboard and add a manual card:

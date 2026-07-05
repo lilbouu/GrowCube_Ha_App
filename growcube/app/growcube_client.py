@@ -202,7 +202,10 @@ class GrowCubeClient:
             self._read_task = None
         if self._writer is not None:
             self._writer.close()
-            await self._writer.wait_closed()
+            try:
+                await self._writer.wait_closed()
+            except (ConnectionError, OSError):
+                LOGGER.debug("GrowCube disconnect ignored socket close error for %s:%s", self.host, self.port)
         self._reader = None
         self._writer = None
 
