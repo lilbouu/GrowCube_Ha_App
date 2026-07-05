@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.41
+
+- Use relative Web UI API requests so Home Assistant ingress routes dashboard and discovery calls back to the add-on.
+
 ## 0.2.40
 
 - Add an add-on Web UI for GrowCube device discovery, manual add, remove, and live connection status.

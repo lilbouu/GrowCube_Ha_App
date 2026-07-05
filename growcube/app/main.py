@@ -1775,18 +1775,18 @@ function renderDevices(payload) {
 }
 
 async function refreshDevices() {
-  renderDevices(await fetchJson("/dashboard"));
+  renderDevices(await fetchJson("dashboard"));
 }
 
 async function addDevice(host, name) {
   const params = new URLSearchParams({host, name: name || host});
-  await fetchJson("/devices/add?" + params.toString());
+  await fetchJson("devices/add?" + params.toString());
   await refreshDevices();
 }
 
 async function removeDevice(deviceId) {
   const params = new URLSearchParams({device_id: deviceId});
-  await fetchJson("/devices/remove?" + params.toString());
+  await fetchJson("devices/remove?" + params.toString());
   await refreshDevices();
 }
 
@@ -1798,7 +1798,7 @@ async function discoverDevices() {
   try {
     const network = document.getElementById("networkInput").value.trim();
     const query = network ? "?" + new URLSearchParams({network}).toString() : "";
-    const payload = await fetchJson("/devices/discover" + query);
+    const payload = await fetchJson("devices/discover" + query);
     const devices = payload.devices || [];
     statusEl.textContent = devices.length ? `Found ${devices.length} device(s).` : "No GrowCube devices found.";
     resultsEl.innerHTML = devices.map((device) => `
