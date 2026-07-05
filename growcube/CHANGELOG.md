@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.47
+
+- Restore the add-on mount layout that worked in earlier builds: `addon_config:rw` plus `config:rw`.
+- Prefer copying the Lovelace card to `/config/www/growcube`, matching the original working add-on layout.
+
 ## 0.2.46
 
 - Mount the Home Assistant configuration directory with the standard `config:rw` add-on map so the Lovelace card can be copied to `/config/www/growcube`.

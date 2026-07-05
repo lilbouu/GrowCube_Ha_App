@@ -66,9 +66,9 @@ _PLANT_SEARCH_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 PLANT_SEARCH_CACHE_TTL_SECONDS = 15 * 60
 _SUPERVISOR_INGRESS_URL_CACHE: str | None = None
 CARD_TARGET_PATHS = (
+    Path("/config/www/growcube/growcube-card.js"),
     Path("/homeassistant/www/growcube/growcube-card.js"),
     Path("/homeassistant_config/www/growcube/growcube-card.js"),
-    Path("/config/www/growcube/growcube-card.js"),
 )
 CHANNEL_NAMES = ("A", "B", "C", "D")
 GROWCUBE_TANK_CAPACITY_ML = 1500
