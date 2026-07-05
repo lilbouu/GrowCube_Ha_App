@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.33
+
+- Resolve saved plant photo URLs from dashboard metadata, Home Assistant text entities, and markdown-style copied URLs before rendering images.
+- Show fallback moisture as a single current point on the right side of the selected chart window instead of stretching it across the whole range.
+
 ## 0.2.32
 
 - Keep catalog plant photos attached when adding plants and show them immediately in the plant About view.

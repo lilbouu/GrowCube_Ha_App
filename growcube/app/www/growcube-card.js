@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.32-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.33-addon-compat";
 const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
@@ -778,7 +778,9 @@ class GrowcubeCard extends HTMLElement {
     const coords = this._graphCoordinates(points, width, height, padding, leftPadding, timeStart, timeEnd);
     if (coords.length === 1) {
       const { x, y } = coords[0];
-      return `M ${x} ${y} L ${x + 1} ${y}`;
+      const startX = Math.max(leftPadding, x - 14);
+      const endX = Math.min(width - padding, x + 2);
+      return `M ${startX} ${y} L ${endX} ${y}`;
     }
     return coords.reduce((path, point, index) => {
       if (index === 0) {
@@ -1809,7 +1811,9 @@ class GrowcubeCard extends HTMLElement {
   }
 
   _normalizePlantImageUrl(value) {
-    const text = String(value || "").trim();
+    const rawText = String(value || "").trim();
+    const markdownMatch = rawText.match(/^\[([^\]]+)\]\((https?:\/\/[^)]+)\)$/i);
+    const text = (markdownMatch ? markdownMatch[2] : rawText).trim();
     if (!text) {
       return "";
     }
@@ -1830,6 +1834,22 @@ class GrowcubeCard extends HTMLElement {
 
   _plantImageUrl(value) {
     return this._normalizePlantImageUrl(value);
+  }
+
+  _resolvedPlantPhotoUrl(...values) {
+    for (const value of values) {
+      const raw = String(value || "").trim();
+      if (!raw) {
+        continue;
+      }
+      const state = this._state(raw);
+      const candidate = state ? state.state : raw;
+      const url = this._plantImageUrl(candidate);
+      if (url) {
+        return url;
+      }
+    }
+    return "";
   }
 
   _catalogImageUrl(item = {}) {
@@ -3616,7 +3636,7 @@ class GrowcubeCard extends HTMLElement {
   }
 
   _plantRowTemplate({ channel, entities, deviceId = "", metadata = {} }) {
-    const photoUrl = this._plantImageUrl(metadata.photo_url || this._entityState(entities.photo_url, ""));
+    const photoUrl = this._resolvedPlantPhotoUrl(metadata.photo_url, entities.photo_url);
     const name = metadata.plant_name || this._entityDisplay(entities.name, this._channelName(channel));
     const moisture = this._entityDisplay(entities.moisture, "Unknown");
     const mode = this._normalizeMode(this._entityState(entities.mode, "Disabled"));
@@ -3975,10 +3995,10 @@ class GrowcubeCard extends HTMLElement {
     const aboutText = profile.description || (this._aboutProfileLoading ? "Loading plant information..." : "No plant information is available for this profile yet.");
     const category = profile.category || "Plant profile";
     const channelMeta = this._deviceRecord()?.channels?.[this._channelKey()] || {};
-    const photoUrl = this._plantImageUrl(
-      channelMeta.photo_url
-      || this._entityState(data.entities.photo_url, "")
-      || this._catalogImageUrl(this._plantWizardSelected || {}),
+    const photoUrl = this._resolvedPlantPhotoUrl(
+      channelMeta.photo_url,
+      data.entities.photo_url,
+      this._catalogImageUrl(this._plantWizardSelected || {}),
     );
     const statCards = [
       this._profileStatTemplate("Soil moisture", this._rangeText(data.smartMinMoisture, data.smartMaxMoisture, "%")),
@@ -4098,9 +4118,10 @@ class GrowcubeCard extends HTMLElement {
         </div>
       `;
     }
-    const graphSourcePoints = visibleHistoryPoints.length
-      ? visibleHistoryPoints
-      : this._fallbackMoistureHistoryPoints(entities, windowStart, windowEnd);
+    const usingFallbackHistory = !visibleHistoryPoints.length;
+    const graphSourcePoints = usingFallbackHistory
+      ? this._fallbackMoistureHistoryPoints(entities, windowEnd)
+      : visibleHistoryPoints;
     if (!graphSourcePoints.length) {
       return `
         <div class="chart-panel">
@@ -4112,10 +4133,9 @@ class GrowcubeCard extends HTMLElement {
         </div>
       `;
     }
-    const points = this._extendFreshHistoryToNow(
-      this._smoothGraphPoints(graphSourcePoints),
-      windowEnd,
-    );
+    const points = usingFallbackHistory
+      ? graphSourcePoints
+      : this._extendFreshHistoryToNow(this._smoothGraphPoints(graphSourcePoints), windowEnd);
     const coords = this._graphCoordinates(points, width, height, padding, leftPadding, windowStart, windowEnd);
     const minRange = this._clamp(Number(data.smartMinMoisture), 0, 100);
     const maxRange = this._clamp(Number(data.smartMaxMoisture), 0, 100);
@@ -4139,7 +4159,7 @@ class GrowcubeCard extends HTMLElement {
     const path = this._graphPath(points, width, height, padding, leftPadding, windowStart, windowEnd);
     const firstCoord = coords[0];
     const lastCoord = coords[coords.length - 1];
-    const areaPath = path && firstCoord && lastCoord
+    const areaPath = path && firstCoord && lastCoord && coords.length > 1
       ? `M ${firstCoord.x} ${height - padding} ${path} L ${lastCoord.x} ${height - padding} Z`
       : "";
     return `
@@ -4227,15 +4247,12 @@ class GrowcubeCard extends HTMLElement {
       .sort((a, b) => a.t - b.t);
   }
 
-  _fallbackMoistureHistoryPoints(entities, windowStart, windowEnd) {
+  _fallbackMoistureHistoryPoints(entities, windowEnd) {
     const moisture = Number(this._entityState(entities.moisture, NaN));
     if (!Number.isFinite(moisture) || moisture < 0 || moisture > 100) {
       return [];
     }
-    return [
-      { t: windowStart, v: moisture },
-      { t: windowEnd, v: moisture },
-    ];
+    return [{ t: windowEnd, v: moisture }];
   }
 
   _historyEmptyText(historyState, hours) {
