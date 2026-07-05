@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.35-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.39-addon-compat";
 const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
@@ -186,14 +186,16 @@ class GrowcubeCard extends HTMLElement {
     }
     this._dashboardDevicesLoading = true;
     try {
+      const previousDevices = this._dashboardDevices;
       const result = await this._dashboardApi();
-      this._dashboardDevices = Array.isArray(result?.devices) ? result.devices : [];
-      if (!this._dashboardDevices.length || !this._dashboardHasKnownEntities(this._dashboardDevices)) {
-        this._dashboardDevices = this._discoverMqttDashboardDevices();
+      let devices = Array.isArray(result?.devices) ? result.devices : [];
+      if (!devices.length || !this._dashboardHasKnownEntities(devices)) {
+        devices = this._discoverMqttDashboardDevices();
       }
+      this._dashboardDevices = this._mergeDashboardDeviceMetadata(devices, previousDevices);
       this._dashboardDevicesLoadedAt = Date.now();
     } catch (error) {
-      this._dashboardDevices = this._discoverMqttDashboardDevices();
+      this._dashboardDevices = this._mergeDashboardDeviceMetadata(this._discoverMqttDashboardDevices(), this._dashboardDevices);
       this._dashboardDevicesLoadedAt = Date.now();
     } finally {
       this._dashboardDevicesLoading = false;
@@ -425,6 +427,31 @@ class GrowcubeCard extends HTMLElement {
     });
   }
 
+  _mergeDashboardDeviceMetadata(devices, previousDevices = []) {
+    if ((!devices || !devices.length) && previousDevices?.length) {
+      return previousDevices;
+    }
+    const previousById = new Map((previousDevices || []).map((device) => [device?.device_id, device]));
+    return (devices || []).map((device) => {
+      const previous = previousById.get(device?.device_id) || {};
+      const channels = { ...(device.channels || {}) };
+      this._channels().forEach((channel) => {
+        const nextChannel = channels[channel] || {};
+        const previousChannel = previous.channels?.[channel] || {};
+        channels[channel] = {
+          ...nextChannel,
+          plant_name: nextChannel.plant_name || previousChannel.plant_name || "",
+          photo_url: nextChannel.photo_url || previousChannel.photo_url || "",
+          configured: nextChannel.configured ?? previousChannel.configured,
+        };
+      });
+      return {
+        ...device,
+        channels,
+      };
+    });
+  }
+
   _mqttDashboardDevice(prefix) {
     const temperature = this._mqttEntity("sensor", prefix, "temperature");
     const name = this._state(temperature)?.attributes?.friendly_name
@@ -461,8 +488,8 @@ class GrowcubeCard extends HTMLElement {
       history_count: this._mqttEntity("sensor", prefix, `history_count_${channel}`),
       next_watering: this._mqttEntity("sensor", prefix, `next_watering_${channel}`),
       mode: this._mqttEntity("select", prefix, `watering_mode_${channel}`),
-      first_watering_time: this._mqttEntity("text", prefix, `first_watering_time_${channel}`)
-        || this._mqttEntity("time", prefix, `first_watering_time_${channel}`),
+      first_watering_time: this._mqttEntity("time", prefix, `first_watering_time_${channel}`)
+        || this._mqttEntity("text", prefix, `first_watering_time_${channel}`),
       duration: this._mqttEntity("number", prefix, `duration_seconds_${channel}`),
       interval: this._mqttEntity("number", prefix, `interval_hours_${channel}`),
       smart_min_moisture: this._mqttEntity("number", prefix, `smart_min_moisture_${channel}`),
@@ -612,8 +639,8 @@ class GrowcubeCard extends HTMLElement {
       next_watering: mappedChannelEntities.next_watering || this._entityBySuffix("sensor", `_next_watering_${channel}`),
       mode: mappedChannelEntities.mode || this._entityBySuffix("select", `_watering_mode_${channel}`),
       first_watering_time: mappedChannelEntities.first_watering_time
-        || this._entityBySuffix("text", `_first_watering_time_${channel}`)
-        || this._entityBySuffix("time", `_first_watering_time_${channel}`),
+        || this._entityBySuffix("time", `_first_watering_time_${channel}`)
+        || this._entityBySuffix("text", `_first_watering_time_${channel}`),
       duration: mappedChannelEntities.duration || this._entityBySuffixFiltered(
         "number",
         [`_watering_amount_${channel}`, `_duration_seconds_${channel}`],
@@ -1556,7 +1583,12 @@ class GrowcubeCard extends HTMLElement {
       if (apiResult) {
         console.info("[GrowCube] add plant via add-on API succeeded", { channel, mode });
         this._plantWizardOpen = false;
-        this._applyOptimisticChannelMetadata(channel, values);
+        this._applyOptimisticChannelMetadata(channel, {
+          ...values,
+          plant_name: apiResult.plant_name || values.plant_name,
+          photo_url: apiResult.photo_url || values.photo_url,
+          configured: apiResult.configured ?? values.configured,
+        });
         this._dashboardDevicesLoadedAt = 0;
         this._loadDashboardDevicesIfNeeded(true);
         this._showToast("Plant added");

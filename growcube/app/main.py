@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import shutil
+import socket
 import threading
 import time
 import uuid
@@ -65,7 +66,20 @@ CARD_TARGET_PATHS = (
     Path("/config/www/growcube/growcube-card.js"),
 )
 CHANNEL_NAMES = ("A", "B", "C", "D")
-TANK_UNUSABLE_RESERVE_ML = 200
+GROWCUBE_TANK_CAPACITY_ML = 1500
+GROWCUBE_TANK_UNUSABLE_RESERVE_ML = 300
+RECONNECT_DELAY_SECONDS = 10
+WATERING_APPLY_DELAY_SECONDS = 0.75
+DISCOVERY_PORT_TIMEOUT_SECONDS = 0.35
+DISCOVERY_DEVICE_TIMEOUT_SECONDS = 8
+DISCOVERY_CONCURRENCY = 64
+DISCOVERY_MAX_HOSTS = 254
+HISTORY_RETRY_CHECK_SECONDS = 15
+HISTORY_LOADING_STALE_SECONDS = 45
+TIMED_HISTORY_REFRESH_GRACE_SECONDS = 5
+TIMED_HISTORY_REFRESH_RETRY_SECONDS = 15
+HISTORY_TRAILING_GAP_RETRY_SECONDS = 60 * 60
+HISTORY_TRAILING_GAP_HOURS = 0
 
 
 @dataclass(slots=True)
@@ -140,32 +154,66 @@ class DeviceRuntime:
         self.state = state
         self.client: GrowCubeClient | None = None
         self.task: asyncio.Task | None = None
+        self.reconnect_task: asyncio.Task | None = None
+        self.reconnect_enabled = True
+        self.connect_lock = asyncio.Lock()
         self.pending_manual_amounts: dict[int, int] = {}
         self.history_lock = asyncio.Lock()
+        self.history_loading_since: list[datetime | None] = [None] * 4
+        self.timed_history_refresh_requested_at: list[datetime | None] = [None] * 4
+        self.history_gap_retry_at: list[datetime | None] = [None] * 4
 
-    async def connect(self) -> None:
-        async with self.manager.async_lock:
-            self.state.connecting = True
-            self.state.error = ""
-            self.manager.touch_locked(self.state)
-
-        client = GrowCubeClient(
-            self.state.host,
-            self.state.port,
-            on_report=lambda report: self.manager.handle_report(self.state.id, report),
-            on_connected=lambda: self.manager.handle_connected(self.state.id),
-            on_disconnected=lambda: self.manager.handle_disconnected(self.state.id),
-        )
-        self.client = client
-        ok, error = await client.connect()
-        if not ok:
+    async def connect(self, *, schedule_retry: bool = True) -> None:
+        async with self.connect_lock:
+            if self.client is not None and self.client.connected:
+                return
             async with self.manager.async_lock:
-                self.state.connected = False
-                self.state.connecting = False
-                self.state.error = error
+                self.state.connecting = True
+                self.state.error = ""
                 self.manager.touch_locked(self.state)
 
+            client = GrowCubeClient(
+                self.state.host,
+                self.state.port,
+                on_report=lambda report: self.manager.handle_report(self.state.id, report),
+                on_connected=lambda: self.manager.handle_connected(self.state.id),
+                on_disconnected=lambda: self.manager.handle_disconnected(self.state.id),
+            )
+            self.client = client
+            ok, error = await client.connect()
+            if not ok:
+                async with self.manager.async_lock:
+                    self.state.connected = False
+                    self.state.connecting = False
+                    self.state.error = error
+                    self.manager.touch_locked(self.state)
+                if schedule_retry:
+                    self.schedule_reconnect()
+
+    def schedule_reconnect(self) -> None:
+        if not self.reconnect_enabled:
+            return
+        if self.reconnect_task is not None and not self.reconnect_task.done():
+            return
+        self.reconnect_task = asyncio.create_task(self._reconnect_loop())
+
+    async def _reconnect_loop(self) -> None:
+        while self.reconnect_enabled:
+            await asyncio.sleep(RECONNECT_DELAY_SECONDS)
+            if not self.reconnect_enabled:
+                return
+            if self.client is not None and self.client.connected:
+                return
+            LOGGER.info("Retrying GrowCube connection to %s:%s", self.state.host, self.state.port)
+            await self.connect(schedule_retry=False)
+            if self.client is not None and self.client.connected:
+                return
+
     async def disconnect(self) -> None:
+        self.reconnect_enabled = False
+        if self.reconnect_task is not None:
+            self.reconnect_task.cancel()
+            self.reconnect_task = None
         if self.client is not None:
             await self.client.disconnect()
         async with self.manager.async_lock:
@@ -180,6 +228,9 @@ class GrowCubeManager:
         self.async_lock = asyncio.Lock()
         self.devices: dict[str, DeviceState] = {}
         self.runtimes: dict[str, DeviceRuntime] = {}
+        self.pending_apply_tasks: dict[tuple[str, int], asyncio.Task] = {}
+        self.history_retry_task: asyncio.Task | None = None
+        self.notification_signatures: dict[str, tuple[str, ...]] = {}
         self.loop: asyncio.AbstractEventLoop | None = None
         self.mqtt_bridge: MqttBridge | None = None
 
@@ -223,6 +274,7 @@ class GrowCubeManager:
         self.loop = asyncio.new_event_loop()
         thread = threading.Thread(target=self._run_loop, name="growcube-loop", daemon=True)
         thread.start()
+        self.submit(self.history_retry_loop())
         for device_id in list(self.devices):
             self.submit(self.connect(device_id))
 
@@ -300,6 +352,18 @@ class GrowCubeManager:
             "mode": state.channels[channel].config.mode,
         }
 
+    def discover_payload(self, network_value: str) -> dict[str, Any]:
+        future = self.submit(self.discover_devices(network_value))
+        devices = future.result(timeout=45)
+        return {"devices": devices}
+
+    def add_device_payload(self, params: dict[str, list[str]]) -> dict[str, Any]:
+        host = first_query_value(params, "host")
+        name = first_query_value(params, "name") or host
+        port = clamp_int(first_query_value(params, "port"), 1, 65535, 8800)
+        future = self.submit(self.add_device(name, host, port))
+        return {"device": future.result(timeout=15)}
+
     def configure_channel_payload(self, device_id: str, channel_value: str, params: dict[str, list[str]]) -> dict[str, Any]:
         channel = validate_channel_key(channel_value)
         state = self.find_device(device_id) if device_id else next(iter(self.devices.values()), None)
@@ -313,6 +377,15 @@ class GrowCubeManager:
             "ok": True,
             "device_id": mqtt_device_unique_id(self._state_to_dict(state)),
             "channel": "abcd"[channel],
+            "configured": state.channels[channel].plant_configured and config.configured,
+            "plant_name": config.plant_name,
+            "photo_url": config.photo_url,
+            "type_category": config.type_category,
+            "type_description": config.type_description,
+            "temp_min": config.temp_min,
+            "temp_max": config.temp_max,
+            "air_humidity_min": config.air_humidity_min,
+            "air_humidity_max": config.air_humidity_max,
             "mode": config.mode,
             "first_watering_time": config.first_watering_time,
             "amount_ml": config.amount_ml,
@@ -347,6 +420,18 @@ class GrowCubeManager:
         host = host.strip()
         if not host:
             raise ValueError("host is required")
+        existing_id = None
+        async with self.async_lock:
+            for device_id, existing in self.devices.items():
+                if existing.host.strip().lower() == host.lower():
+                    existing.name = name.strip() or existing.name or host
+                    existing.port = max(1, min(65535, int(port or 8800)))
+                    existing_id = device_id
+                    self.save_locked()
+                    break
+        if existing_id is not None:
+            await self.connect(existing_id)
+            return self._state_to_dict(self.devices[existing_id])
         state = DeviceState(
             id=str(uuid.uuid4()),
             name=name.strip() or host,
@@ -363,6 +448,7 @@ class GrowCubeManager:
         runtime = self.runtimes.pop(device_id, None)
         if runtime is not None:
             await runtime.disconnect()
+        self.cancel_pending_apply(device_id)
         async with self.async_lock:
             self.devices.pop(device_id, None)
             self.save_locked()
@@ -404,6 +490,7 @@ class GrowCubeManager:
                 state.channels[channel].history_loading = True
                 state.channels[channel].history_complete = False
                 state.channels[channel].watering_events_complete = False
+                runtime.history_loading_since[channel] = datetime.now(timezone.utc)
                 self.touch_locked(state)
             await runtime.client.request_history(channel)
             deadline = time.monotonic() + 20
@@ -414,9 +501,7 @@ class GrowCubeManager:
                         return
                 await asyncio.sleep(0.25)
             async with self.async_lock:
-                state = self.devices[device_id]
-                state.channels[channel].history_loading = False
-                self.touch_locked(state)
+                self.touch_locked(self.devices[device_id])
             LOGGER.warning("History request timed out device=%s channel=%s", self.devices[device_id].host, CHANNEL_NAMES[channel])
 
     async def set_tank_level(self, device_id: str, capacity_ml: int, remaining_ml: int) -> None:
@@ -439,6 +524,7 @@ class GrowCubeManager:
         if runtime is None or runtime.client is None or not runtime.client.connected:
             raise RuntimeError("device is not connected")
         channel = validate_channel(channel)
+        self.cancel_pending_apply(device_id, channel)
         LOGGER.info("Reset plant device=%s channel=%s", self.devices[device_id].host, CHANNEL_NAMES[channel])
         await runtime.client.send(Command(47, f"{channel}@0"))
         await runtime.client.send(Command(45, f"{channel}"))
@@ -492,6 +578,169 @@ class GrowCubeManager:
         else:
             LOGGER.info("Disable watering device=%s channel=%s", self.devices[device_id].host, CHANNEL_NAMES[channel])
             await self._reset_watering_mode(runtime, channel)
+
+    async def discover_devices(self, network_value: str) -> list[dict[str, Any]]:
+        networks = discovery_networks(network_value)
+        semaphore = asyncio.Semaphore(DISCOVERY_CONCURRENCY)
+        found: dict[str, dict[str, Any]] = {}
+
+        async def check_host(host: str) -> None:
+            async with semaphore:
+                if not await tcp_port_open(host, 8800, DISCOVERY_PORT_TIMEOUT_SECONDS):
+                    return
+                device = await probe_growcube_device(host)
+                if device is None:
+                    return
+                found[device["device_id"] or host] = device
+
+        await asyncio.gather(
+            *[
+                check_host(str(host))
+                for network in networks
+                for host in network.hosts()
+            ]
+        )
+        return sorted(found.values(), key=lambda item: str(item.get("host", "")))
+
+    def schedule_watering_apply(self, device_id: str, channel: int) -> None:
+        channel = validate_channel(channel)
+        state = self.devices.get(device_id)
+        if state is None or not state.channels[channel].config.configured:
+            return
+        self.cancel_pending_apply(device_id, channel)
+        task = asyncio.create_task(self._apply_watering_after_delay(device_id, channel))
+        self.pending_apply_tasks[(device_id, channel)] = task
+
+    def cancel_pending_apply(self, device_id: str, channel: int | None = None) -> None:
+        keys = [
+            key for key in self.pending_apply_tasks
+            if key[0] == device_id and (channel is None or key[1] == channel)
+        ]
+        for key in keys:
+            task = self.pending_apply_tasks.pop(key)
+            task.cancel()
+
+    async def _apply_watering_after_delay(self, device_id: str, channel: int) -> None:
+        key = (device_id, channel)
+        try:
+            await asyncio.sleep(WATERING_APPLY_DELAY_SECONDS)
+            state = self.devices.get(device_id)
+            if state is None or not state.channels[channel].config.configured:
+                return
+            await self.apply_watering_config(device_id, channel)
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:
+            state = self.devices.get(device_id)
+            LOGGER.warning(
+                "Debounced watering apply failed device=%s channel=%s error=%s",
+                state.host if state is not None else device_id,
+                CHANNEL_NAMES[channel],
+                err,
+            )
+        finally:
+            if self.pending_apply_tasks.get(key) is asyncio.current_task():
+                self.pending_apply_tasks.pop(key, None)
+
+    async def history_retry_loop(self) -> None:
+        while True:
+            await asyncio.sleep(HISTORY_RETRY_CHECK_SECONDS)
+            try:
+                await self.history_retry_tick()
+            except Exception:
+                LOGGER.exception("GrowCube history retry tick failed")
+
+    async def history_retry_tick(self) -> None:
+        for device_id, state in list(self.devices.items()):
+            runtime = self.runtimes.get(device_id)
+            if runtime is None or runtime.client is None or not runtime.client.connected:
+                continue
+            now = datetime.now(timezone.utc)
+            if await self.request_stale_history_retry(device_id, runtime, state, now):
+                continue
+            if await self.request_due_timed_watering_history(device_id, runtime, state, now):
+                continue
+            await self.request_trailing_gap_history_retry(device_id, runtime, state, now)
+
+    async def request_stale_history_retry(self, device_id: str, runtime: DeviceRuntime, state: DeviceState, now: datetime) -> bool:
+        for channel, channel_state in enumerate(state.channels):
+            if not channel_state.history_loading:
+                runtime.history_loading_since[channel] = None
+                continue
+            loading_since = runtime.history_loading_since[channel]
+            if loading_since is None:
+                runtime.history_loading_since[channel] = now
+                continue
+            if (now - loading_since).total_seconds() < HISTORY_LOADING_STALE_SECONDS:
+                continue
+            LOGGER.warning("Retrying stuck GrowCube history load device=%s channel=%s", state.host, CHANNEL_NAMES[channel])
+            await self.request_history(device_id, channel)
+            return True
+        return False
+
+    async def request_due_timed_watering_history(self, device_id: str, runtime: DeviceRuntime, state: DeviceState, now: datetime) -> bool:
+        for channel, channel_state in enumerate(state.channels):
+            config = channel_state.config
+            if (
+                not config.configured
+                or config.mode != "Repeating"
+                or config.interval_hours <= 0
+                or channel_state.last_watering is None
+                or channel_state.history_loading
+            ):
+                continue
+            last_watering = parse_iso_datetime(channel_state.last_watering)
+            if last_watering is None:
+                continue
+            expected = last_watering + timedelta(hours=config.interval_hours)
+            if expected > now - timedelta(seconds=TIMED_HISTORY_REFRESH_GRACE_SECONDS):
+                continue
+            last_request = runtime.timed_history_refresh_requested_at[channel]
+            if last_request is not None and (now - last_request).total_seconds() < TIMED_HISTORY_REFRESH_RETRY_SECONDS:
+                continue
+            runtime.timed_history_refresh_requested_at[channel] = now
+            LOGGER.info("Requesting timed watering history refresh device=%s channel=%s", state.host, CHANNEL_NAMES[channel])
+            await self.request_history(device_id, channel)
+            return True
+        return False
+
+    async def request_trailing_gap_history_retry(self, device_id: str, runtime: DeviceRuntime, state: DeviceState, now: datetime) -> bool:
+        current_hour = history_hour_key(now)
+        if current_hour is None:
+            return False
+        for channel, channel_state in enumerate(state.channels):
+            if (
+                not channel_state.config.configured
+                or channel_state.history_loading
+                or channel_state.moisture is None
+                or not channel_state.history_complete
+                or not channel_state.history
+            ):
+                continue
+            last_request = runtime.history_gap_retry_at[channel]
+            if last_request is not None and (now - last_request).total_seconds() < HISTORY_TRAILING_GAP_RETRY_SECONDS:
+                continue
+            last_hour = 0
+            for point in channel_state.history:
+                point_hour = history_hour_key(parse_iso_datetime(point.get("timestamp")))
+                if point_hour is not None and point_hour > last_hour:
+                    last_hour = point_hour
+            gap_hours = current_hour - last_hour if last_hour > 0 else HISTORY_TRAILING_GAP_HOURS + 1
+            if gap_hours <= HISTORY_TRAILING_GAP_HOURS:
+                continue
+            runtime.history_gap_retry_at[channel] = now
+            LOGGER.info("Retrying history for trailing gap device=%s channel=%s gap=%s h", state.host, CHANNEL_NAMES[channel], gap_hours)
+            await self.request_history(device_id, channel)
+            return True
+        return False
+
+    async def sync_notifications(self, device: dict[str, Any]) -> None:
+        device_id = str(device.get("id") or device.get("device_id") or device.get("host") or "growcube")
+        signature = notification_signature(device)
+        if self.notification_signatures.get(device_id) == signature:
+            return
+        self.notification_signatures[device_id] = signature
+        await asyncio.to_thread(sync_homeassistant_notifications, device, signature)
 
     async def _reset_watering_mode(self, runtime: DeviceRuntime, channel: int) -> None:
         if runtime.client is None:
@@ -624,6 +873,7 @@ class GrowCubeManager:
         changed = ""
         tank_update: tuple[int, int] | None = None
         reset_channel: int | None = None
+        schedule_apply = False
         async with self.async_lock:
             if key == "tank_capacity":
                 state.tank_capacity_ml = clamp_int(payload, 500, 50000, state.tank_capacity_ml)
@@ -655,6 +905,7 @@ class GrowCubeManager:
                 elif key.startswith("watering_mode_"):
                     config.mode = payload if payload in {"Disabled", "Repeating", "Smart"} else "Disabled"
                     changed = f"mode={config.mode}"
+                    schedule_apply = True
                 elif key.startswith("manual_duration_seconds_"):
                     config.manual_duration_seconds = clamp_int(payload, 30, 150, config.manual_duration_seconds)
                     changed = f"manual_amount_ml={config.manual_duration_seconds}"
@@ -662,21 +913,27 @@ class GrowCubeManager:
                     config.amount_ml = clamp_int(payload, 10, 500, config.amount_ml)
                     config.duration_seconds = watering_duration_seconds(config.amount_ml)
                     changed = f"amount_ml={config.amount_ml}"
+                    schedule_apply = True
                 elif key.startswith("interval_hours_"):
                     config.interval_hours = clamp_int(payload, 1, 240, config.interval_hours)
                     changed = f"interval_hours={config.interval_hours}"
+                    schedule_apply = True
                 elif key.startswith("first_watering_time_"):
                     config.first_watering_time = normalize_time(payload, config.first_watering_time)
                     changed = f"first_watering_time={config.first_watering_time}"
+                    schedule_apply = True
                 elif key.startswith("smart_min_moisture_"):
                     config.smart_min_moisture = clamp_int(payload, 1, max(1, config.smart_max_moisture - 1), config.smart_min_moisture)
                     changed = f"smart_min={config.smart_min_moisture}"
+                    schedule_apply = True
                 elif key.startswith("smart_max_moisture_"):
                     config.smart_max_moisture = clamp_int(payload, min(99, config.smart_min_moisture + 1), 99, config.smart_max_moisture)
                     changed = f"smart_max={config.smart_max_moisture}"
+                    schedule_apply = True
                 elif key.startswith("smart_daytime_watering_"):
                     config.smart_daytime_watering = payload.upper() in {"ON", "TRUE", "1"}
                     changed = f"smart_daytime={config.smart_daytime_watering}"
+                    schedule_apply = True
                 elif key.startswith("add_plant_"):
                     state.channels[channel].plant_configured = True
                     config.configured = True
@@ -718,6 +975,8 @@ class GrowCubeManager:
                 self.touch_locked(state)
         elif tank_update is not None:
             await self.set_tank_level(state.id, tank_update[0], tank_update[1])
+        elif channel is not None and schedule_apply:
+            self.schedule_watering_apply(state.id, channel)
 
     def find_device(self, device_key: str) -> DeviceState | None:
         lookup = str(device_key or "").strip()
@@ -758,6 +1017,9 @@ class GrowCubeManager:
             state.connected = False
             state.connecting = False
             self.touch_locked(state)
+        runtime = self.runtimes.get(device_id)
+        if runtime is not None:
+            runtime.schedule_reconnect()
 
     async def handle_report(self, device_id: str, report: Report) -> None:
         async with self.async_lock:
@@ -839,6 +1101,10 @@ class GrowCubeManager:
                 else:
                     channel.watering_events_complete = report.success
                 channel.history_loading = not (channel.history_complete and channel.watering_events_complete)
+                if not channel.history_loading:
+                    runtime = self.runtimes.get(device_id)
+                    if runtime is not None:
+                        runtime.history_loading_since[report.channel] = None
             elif isinstance(report, TankStateReport):
                 state.tank_capacity_ml = clamp_int(report.capacity_ml, 500, 50000, state.tank_capacity_ml)
                 state.tank_remaining_ml = clamp_int(report.remaining_ml, 0, state.tank_capacity_ml, state.tank_remaining_ml)
@@ -908,7 +1174,21 @@ class GrowCubeManager:
         self.save_locked()
         bridge = self.mqtt_bridge
         if bridge is not None and self.loop is not None:
-            self.loop.create_task(bridge.publish_device(self._state_to_dict(state)))
+            snapshot = self._state_to_dict(state)
+            self.schedule_loop_task(bridge.publish_device(snapshot))
+            self.schedule_loop_task(self.sync_notifications(snapshot))
+
+    def schedule_loop_task(self, coro) -> None:
+        if self.loop is None:
+            return
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is self.loop:
+            self.loop.create_task(coro)
+        else:
+            asyncio.run_coroutine_threadsafe(coro, self.loop)
 
     def save_locked(self) -> None:
         with self.lock:
@@ -1001,7 +1281,8 @@ class GrowCubeManager:
     @staticmethod
     def _state_to_dict(state: DeviceState) -> dict[str, Any]:
         daily_usage_ml = estimated_daily_usage_ml(state)
-        usable_remaining_ml = max(0, state.tank_remaining_ml - TANK_UNUSABLE_RESERVE_ML)
+        unusable_reserve_ml = tank_unusable_reserve_ml(state.tank_capacity_ml)
+        usable_remaining_ml = max(0, state.tank_remaining_ml - unusable_reserve_ml)
         tank_days_left = round(usable_remaining_ml / daily_usage_ml, 1) if daily_usage_ml > 0 else None
         return {
             "id": state.id,
@@ -1024,7 +1305,7 @@ class GrowCubeManager:
             "tank_used_ml": state.tank_used_ml,
             "tank_days_left": tank_days_left,
             "tank_daily_usage_ml": round(daily_usage_ml, 1) if daily_usage_ml > 0 else None,
-            "tank_unusable_reserve_ml": TANK_UNUSABLE_RESERVE_ML,
+            "tank_unusable_reserve_ml": unusable_reserve_ml,
             "tank_usable_remaining_ml": usable_remaining_ml,
             "tank_forecast": state.tank_forecast,
             "updated_at": state.updated_at,
@@ -1093,6 +1374,29 @@ def clamp_int(value: Any, minimum: int, maximum: int, fallback: int) -> int:
     except (TypeError, ValueError):
         parsed = fallback
     return max(minimum, min(maximum, parsed))
+
+
+def tank_unusable_reserve_ml(capacity_ml: int) -> int:
+    return GROWCUBE_TANK_UNUSABLE_RESERVE_ML if int(capacity_ml) == GROWCUBE_TANK_CAPACITY_ML else 0
+
+
+def parse_iso_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def history_hour_key(value: datetime | None) -> int | None:
+    if value is None or value.year < 2020:
+        return None
+    local_value = value.astimezone()
+    return local_value.toordinal() * 24 + local_value.hour
 
 
 def normalize_time(value: Any, fallback: str) -> str:
@@ -1291,6 +1595,10 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
                 self._write_json({"plants": plants})
             elif parsed.path == "/dashboard":
                 self._write_json(manager.dashboard_payload())
+            elif parsed.path == "/devices/discover":
+                self._write_json(manager.discover_payload(first_query_value(params, "network")))
+            elif parsed.path == "/devices/add":
+                self._write_json(manager.add_device_payload(params))
             elif parsed.path == "/history":
                 self._write_json(
                     manager.history_payload(
@@ -1418,6 +1726,85 @@ def search_plants(query: str) -> list[dict[str, Any]]:
     return result
 
 
+def discovery_networks(network_value: str) -> list[ipaddress.IPv4Network]:
+    text = str(network_value or "").strip()
+    if text:
+        network = ipaddress.ip_network(text, strict=False)
+        if network.version != 4:
+            raise ValueError("Only IPv4 discovery networks are supported")
+        return [limit_discovery_network(network)]
+    networks = local_ipv4_networks()
+    if not networks:
+        raise ValueError("network is required when no local IPv4 network can be detected")
+    return networks
+
+
+def local_ipv4_networks() -> list[ipaddress.IPv4Network]:
+    networks: list[ipaddress.IPv4Network] = []
+    try:
+        addresses = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
+    except OSError:
+        addresses = []
+    for _family, _type, _proto, _canon, sockaddr in addresses:
+        address = ipaddress.ip_address(sockaddr[0])
+        if not address.is_loopback and address.is_private:
+            networks.append(ipaddress.ip_network(f"{address}/24", strict=False))
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_socket:
+            udp_socket.connect(("8.8.8.8", 80))
+            address = ipaddress.ip_address(udp_socket.getsockname()[0])
+            if not address.is_loopback and address.is_private:
+                networks.append(ipaddress.ip_network(f"{address}/24", strict=False))
+    except OSError:
+        pass
+    return list(dict.fromkeys(networks))
+
+
+def limit_discovery_network(network: ipaddress.IPv4Network) -> ipaddress.IPv4Network:
+    if network.num_addresses <= DISCOVERY_MAX_HOSTS + 2:
+        return network
+    first_host = next(network.hosts())
+    return ipaddress.ip_network(f"{first_host}/24", strict=False)
+
+
+async def tcp_port_open(host: str, port: int, timeout_seconds: float) -> bool:
+    try:
+        _reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=timeout_seconds)
+    except (OSError, TimeoutError, asyncio.TimeoutError):
+        return False
+    writer.close()
+    await writer.wait_closed()
+    return True
+
+
+async def probe_growcube_device(host: str) -> dict[str, Any] | None:
+    loop = asyncio.get_running_loop()
+    device_future: asyncio.Future[DeviceVersionReport] = loop.create_future()
+
+    def on_report(report: Report) -> None:
+        if isinstance(report, DeviceVersionReport) and not device_future.done():
+            device_future.set_result(report)
+
+    client = GrowCubeClient(host, 8800, on_report=on_report)
+    ok, error = await client.connect()
+    if not ok:
+        LOGGER.debug("GrowCube discovery probe failed host=%s error=%s", host, error)
+        return None
+    try:
+        report = await asyncio.wait_for(device_future, timeout=DISCOVERY_DEVICE_TIMEOUT_SECONDS)
+        return {
+            "host": host,
+            "port": 8800,
+            "device_id": report.device_id,
+            "version": report.version,
+            "name": f"GrowCube {report.device_id}",
+        }
+    except (TimeoutError, asyncio.TimeoutError):
+        return None
+    finally:
+        await client.disconnect()
+
+
 def fetch_catalog_json(path: str) -> dict[str, Any]:
     last_error: Exception | None = None
     for host in CLOUD_CATALOG_HOSTS:
@@ -1516,7 +1903,7 @@ def dashboard_channel_entities(device_id: str, channel: str) -> dict[str, str]:
         "history_count": entity_id("sensor", device_id, f"history_count_{channel}"),
         "next_watering": entity_id("sensor", device_id, f"next_watering_{channel}"),
         "mode": entity_id("select", device_id, f"watering_mode_{channel}"),
-        "first_watering_time": entity_id("text", device_id, f"first_watering_time_{channel}"),
+        "first_watering_time": entity_id("time", device_id, f"first_watering_time_{channel}"),
         "duration": entity_id("number", device_id, f"duration_seconds_{channel}"),
         "interval": entity_id("number", device_id, f"interval_hours_{channel}"),
         "smart_min_moisture": entity_id("number", device_id, f"smart_min_moisture_{channel}"),
@@ -1656,6 +2043,111 @@ def normalize_ingress_url(value: Any) -> str:
     if text.startswith("api/hassio_ingress/"):
         return f"/{text.rstrip('/')}"
     return f"/api/hassio_ingress/{text.strip('/')}"
+
+
+def notification_signature(device: dict[str, Any]) -> tuple[str, ...]:
+    parts: list[str] = []
+    if not device.get("connected") and not device.get("connecting"):
+        parts.append("connection")
+    if device.get("water_warning"):
+        parts.append("water_warning")
+    if device.get("device_locked"):
+        parts.append("device_locked")
+    for index, channel in enumerate(device.get("channels") or []):
+        label = CHANNEL_NAMES[index] if index < len(CHANNEL_NAMES) else str(index)
+        for key in ("outlet_blocked", "sensor_disconnected", "sensor_fault", "watering_issue", "watering_locked"):
+            if channel.get(key):
+                parts.append(f"{label}:{key}")
+    return tuple(parts)
+
+
+def sync_homeassistant_notifications(device: dict[str, Any], signature: tuple[str, ...]) -> None:
+    device_id = mqtt_safe_id(str(device.get("host") or device.get("device_id") or device.get("id") or "growcube"))
+    host = str(device.get("host") or "GrowCube")
+
+    connection_id = f"growcube_{device_id}_connection_problem"
+    if "connection" in signature:
+        create_persistent_notification(
+            connection_id,
+            "GrowCube connection problem",
+            f"GrowCube at {host} is disconnected. The add-on is retrying in the background.",
+        )
+    else:
+        dismiss_persistent_notification(connection_id)
+
+    alerts: list[str] = []
+    if device.get("water_warning"):
+        alerts.append("- Water tank is low")
+    if device.get("device_locked"):
+        alerts.append("- GrowCube is locked")
+
+    for index, channel in enumerate(device.get("channels") or []):
+        label = CHANNEL_NAMES[index] if index < len(CHANNEL_NAMES) else str(index)
+        if channel.get("outlet_blocked"):
+            alerts.append(f"- Channel {label}: pump stall or block detected")
+        if channel.get("sensor_disconnected"):
+            alerts.append(f"- Channel {label}: soil sensor is not connected")
+        elif channel.get("sensor_fault"):
+            alerts.append(f"- Channel {label}: sensor reported an exception")
+
+        issue_id = f"growcube_{device_id}_watering_issue_{label.lower()}"
+        locked_id = f"growcube_{device_id}_watering_locked_{label.lower()}"
+        if channel.get("watering_locked"):
+            dismiss_persistent_notification(issue_id)
+            create_persistent_notification(
+                locked_id,
+                "GrowCube watering alert",
+                f"Channel {label}: moisture did not rise after repeated smart watering.",
+            )
+        elif channel.get("watering_issue"):
+            dismiss_persistent_notification(locked_id)
+            create_persistent_notification(
+                issue_id,
+                "GrowCube watering alert",
+                f"Channel {label}: moisture did not rise after smart watering.",
+            )
+        else:
+            dismiss_persistent_notification(issue_id)
+            dismiss_persistent_notification(locked_id)
+
+    alerts_id = f"growcube_{device_id}_alerts"
+    if alerts:
+        create_persistent_notification(alerts_id, "GrowCube alerts", "\n".join(alerts))
+    else:
+        dismiss_persistent_notification(alerts_id)
+
+
+def create_persistent_notification(notification_id: str, title: str, message: str) -> None:
+    call_homeassistant_service(
+        "persistent_notification",
+        "create",
+        {"notification_id": notification_id, "title": title, "message": message},
+    )
+
+
+def dismiss_persistent_notification(notification_id: str) -> None:
+    call_homeassistant_service("persistent_notification", "dismiss", {"notification_id": notification_id})
+
+
+def call_homeassistant_service(domain: str, service: str, payload: dict[str, Any]) -> None:
+    token = os.environ.get("SUPERVISOR_TOKEN", "")
+    if not token:
+        return
+    request = Request(
+        f"http://supervisor/core/api/services/{domain}/{service}",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=5):
+            return
+    except (HTTPError, URLError, TimeoutError, OSError) as err:
+        LOGGER.warning("Home Assistant service call failed %s.%s: %s", domain, service, err)
 
 
 manager = GrowCubeManager()

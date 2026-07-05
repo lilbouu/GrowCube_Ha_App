@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.2.39
+
+- Publish `first_watering_time_*` as MQTT `time` entities instead of text entities to match the HACS integration.
+- Add `/devices/discover` LAN scanning for GrowCube devices by network, with automatic local `/24` fallback when possible.
+- Add HACS-style history retry checks for stuck history loads, due scheduled watering refreshes, and trailing history gaps.
+- Create and dismiss Home Assistant persistent notifications for connection, tank, lock, sensor, outlet, and smart watering alerts.
+
+## 0.2.38
+
+- Apply the 300 mL unusable reserve only when the reservoir capacity is the built-in 1500 mL GrowCube tank.
+- Use the full remaining amount for custom reservoir capacities when calculating tank days left.
+
+## 0.2.37
+
+- Match the HACS tank-days-left calculation by using the same 300 mL unusable tank reserve.
+- Retry GrowCube TCP connections every 10 seconds after startup failures or later disconnects.
+- Debounce and apply watering mode, amount, interval, first-time, and smart-threshold entity edits so MQTT entity changes behave closer to the HACS integration.
+
+## 0.2.36
+
+- Return saved plant photo metadata from the direct channel config API after adding a plant.
+- Keep the confirmed backend `photo_url` in the card's local dashboard state so the plant image does not fall back to the flower icon immediately after save.
+
 ## 0.2.35
 
 - Bump the add-on and Lovelace card asset version after the 0.2.34 card copy was not visible in Home Assistant.
