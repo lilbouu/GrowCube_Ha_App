@@ -364,6 +364,15 @@ class GrowCubeManager:
         future = self.submit(self.add_device(name, host, port))
         return {"device": future.result(timeout=15)}
 
+    def remove_device_payload(self, params: dict[str, list[str]]) -> dict[str, Any]:
+        device_id = first_query_value(params, "device_id")
+        state = self.find_device(device_id)
+        if state is None:
+            raise KeyError("device not found")
+        future = self.submit(self.remove_device(state.id))
+        future.result(timeout=10)
+        return {"ok": True, "device_id": device_id}
+
     def configure_channel_payload(self, device_id: str, channel_value: str, params: dict[str, list[str]]) -> dict[str, Any]:
         channel = validate_channel_key(channel_value)
         state = self.find_device(device_id) if device_id else next(iter(self.devices.values()), None)
@@ -403,6 +412,9 @@ class GrowCubeManager:
             "host": state.host,
             "name": state.name or f"GrowCube {state.host}",
             "connected": state.connected,
+            "connecting": state.connecting,
+            "error": state.error,
+            "version": state.version or "",
             "addon_api_url": device.get("addon_api_url") or "",
             "entities": dashboard_device_entities(device_id),
             "channels": {
@@ -1568,6 +1580,268 @@ def mqtt_options() -> MqttOptions:
     )
 
 
+def web_ui_html() -> str:
+    return """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GrowCube Add-on</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f6f8f9;
+      --panel: #ffffff;
+      --text: #172026;
+      --muted: #66757f;
+      --line: #d9e0e4;
+      --accent: #0b7fab;
+      --ok: #17803d;
+      --warn: #b15d00;
+      --bad: #b42318;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #11161a;
+        --panel: #171f24;
+        --text: #edf3f6;
+        --muted: #9aabb4;
+        --line: #2d3a41;
+        --accent: #4db6d8;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main { max-width: 980px; margin: 0 auto; padding: 24px; }
+    header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+    h1 { margin: 0; font-size: 24px; font-weight: 650; }
+    h2 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
+    p { margin: 4px 0 0; color: var(--muted); }
+    section {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      margin: 14px 0;
+    }
+    .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    input {
+      min-width: 220px;
+      flex: 1 1 260px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: transparent;
+      color: var(--text);
+      padding: 10px 12px;
+      font: inherit;
+    }
+    button {
+      border: 1px solid var(--accent);
+      border-radius: 6px;
+      background: var(--accent);
+      color: #fff;
+      padding: 10px 13px;
+      font: inherit;
+      cursor: pointer;
+    }
+    button.secondary { background: transparent; color: var(--accent); }
+    button.danger { border-color: var(--bad); background: transparent; color: var(--bad); }
+    button:disabled { cursor: wait; opacity: .65; }
+    .list { display: grid; gap: 10px; }
+    .item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+    }
+    .title { font-weight: 650; overflow-wrap: anywhere; }
+    .meta { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 6px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+    .dot.ok { background: var(--ok); }
+    .dot.warn { background: var(--warn); }
+    .dot.bad { background: var(--bad); }
+    .empty { color: var(--muted); padding: 10px 0; }
+    .error { color: var(--bad); }
+    @media (max-width: 640px) {
+      main { padding: 16px; }
+      header, .item { grid-template-columns: 1fr; display: grid; }
+      .item button { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>GrowCube Add-on</h1>
+      <p>Discover GrowCube devices, add them to the add-on, and monitor connection state.</p>
+    </div>
+    <button class="secondary" id="refreshBtn">Refresh</button>
+  </header>
+
+  <section>
+    <h2>Devices</h2>
+    <div id="devices" class="list"><div class="empty">Loading devices...</div></div>
+  </section>
+
+  <section>
+    <h2>Discover</h2>
+    <div class="row">
+      <input id="networkInput" placeholder="Network, for example 192.168.1.0/24">
+      <button id="discoverBtn">Search network</button>
+    </div>
+    <p>Leave the network empty to scan the local /24 network detected by the add-on.</p>
+    <div id="discoverStatus" class="meta"></div>
+    <div id="discoverResults" class="list"></div>
+  </section>
+
+  <section>
+    <h2>Manual add</h2>
+    <div class="row">
+      <input id="hostInput" placeholder="GrowCube IP or host">
+      <input id="nameInput" placeholder="Name">
+      <button id="addManualBtn">Add device</button>
+    </div>
+  </section>
+</main>
+<script>
+const devicesEl = document.getElementById("devices");
+const resultsEl = document.getElementById("discoverResults");
+const statusEl = document.getElementById("discoverStatus");
+
+async function fetchJson(path) {
+  const response = await fetch(path, {cache: "no-store"});
+  const data = await response.json();
+  if (!response.ok || data.error) {
+    throw new Error(data.error || response.statusText);
+  }
+  return data;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  }[char]));
+}
+
+function deviceStatus(device) {
+  if (device.connected) return {text: "Connected", cls: "ok"};
+  if (device.connecting) return {text: "Connecting", cls: "warn"};
+  if (device.error) return {text: device.error, cls: "bad"};
+  return {text: "Disconnected", cls: "bad"};
+}
+
+function renderDevices(payload) {
+  const devices = payload.devices || [];
+  if (!devices.length) {
+    devicesEl.innerHTML = '<div class="empty">No devices added yet.</div>';
+    return;
+  }
+  devicesEl.innerHTML = devices.map((device) => {
+    const status = deviceStatus(device);
+    const configured = Object.values(device.channels || {}).filter((channel) => channel.configured).length;
+    const version = device.version ? "Version " + escapeHtml(device.version) + " · " : "";
+    return `
+      <div class="item">
+        <div>
+          <div class="title">${escapeHtml(device.name)}</div>
+          <div class="meta">${escapeHtml(device.host)} · ${version}${configured}/4 channels configured</div>
+          <div class="status"><span class="dot ${status.cls}"></span>${escapeHtml(status.text)}</div>
+        </div>
+        <button class="danger" data-remove="${escapeHtml(device.device_id)}">Remove</button>
+      </div>
+    `;
+  }).join("");
+}
+
+async function refreshDevices() {
+  renderDevices(await fetchJson("/dashboard"));
+}
+
+async function addDevice(host, name) {
+  const params = new URLSearchParams({host, name: name || host});
+  await fetchJson("/devices/add?" + params.toString());
+  await refreshDevices();
+}
+
+async function removeDevice(deviceId) {
+  const params = new URLSearchParams({device_id: deviceId});
+  await fetchJson("/devices/remove?" + params.toString());
+  await refreshDevices();
+}
+
+async function discoverDevices() {
+  const button = document.getElementById("discoverBtn");
+  button.disabled = true;
+  statusEl.textContent = "Searching...";
+  resultsEl.innerHTML = "";
+  try {
+    const network = document.getElementById("networkInput").value.trim();
+    const query = network ? "?" + new URLSearchParams({network}).toString() : "";
+    const payload = await fetchJson("/devices/discover" + query);
+    const devices = payload.devices || [];
+    statusEl.textContent = devices.length ? `Found ${devices.length} device(s).` : "No GrowCube devices found.";
+    resultsEl.innerHTML = devices.map((device) => `
+      <div class="item">
+        <div>
+          <div class="title">${escapeHtml(device.name || "GrowCube")}</div>
+          <div class="meta">${escapeHtml(device.host)}:${escapeHtml(device.port || 8800)} ${device.version ? "· Version " + escapeHtml(device.version) : ""}</div>
+        </div>
+        <button data-add="${escapeHtml(device.host)}" data-name="${escapeHtml(device.name || "GrowCube")}">Add</button>
+      </div>
+    `).join("") || '<div class="empty">Try entering the network manually, for example 192.168.1.0/24.</div>';
+  } catch (err) {
+    statusEl.innerHTML = '<span class="error">' + escapeHtml(err.message) + '</span>';
+  } finally {
+    button.disabled = false;
+  }
+}
+
+document.getElementById("refreshBtn").addEventListener("click", refreshDevices);
+document.getElementById("discoverBtn").addEventListener("click", discoverDevices);
+document.getElementById("addManualBtn").addEventListener("click", async () => {
+  const host = document.getElementById("hostInput").value.trim();
+  const name = document.getElementById("nameInput").value.trim();
+  if (!host) return;
+  await addDevice(host, name);
+});
+document.addEventListener("click", async (event) => {
+  const addHost = event.target?.dataset?.add;
+  const removeId = event.target?.dataset?.remove;
+  if (addHost) await addDevice(addHost, event.target.dataset.name || addHost);
+  if (removeId) await removeDevice(removeId);
+});
+
+refreshDevices().catch((err) => {
+  devicesEl.innerHTML = '<div class="error">' + escapeHtml(err.message) + '</div>';
+});
+setInterval(() => refreshDevices().catch(() => {}), 5000);
+</script>
+</body>
+</html>
+"""
+
+
 class GrowCubeApiHandler(BaseHTTPRequestHandler):
     server_version = "GrowCubeAddon/0.2"
 
@@ -1586,7 +1860,9 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
 
         params = parse_qs(parsed.query)
         try:
-            if parsed.path in {"/", "/health"}:
+            if parsed.path == "/":
+                self._write_html(web_ui_html())
+            elif parsed.path == "/health":
                 self._write_json({"ok": True})
             elif parsed.path == "/plants/search":
                 query = first_query_value(params, "query")
@@ -1595,10 +1871,14 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
                 self._write_json({"plants": plants})
             elif parsed.path == "/dashboard":
                 self._write_json(manager.dashboard_payload())
+            elif parsed.path == "/devices":
+                self._write_json(manager.dashboard_payload())
             elif parsed.path == "/devices/discover":
                 self._write_json(manager.discover_payload(first_query_value(params, "network")))
             elif parsed.path == "/devices/add":
                 self._write_json(manager.add_device_payload(params))
+            elif parsed.path == "/devices/remove":
+                self._write_json(manager.remove_device_payload(params))
             elif parsed.path == "/history":
                 self._write_json(
                     manager.history_payload(
@@ -1668,6 +1948,23 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
         self.send_response(int(status))
         self._send_cors_headers()
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _write_html(self, html: str, status: HTTPStatus = HTTPStatus.OK) -> None:
+        body = html.encode("utf-8")
+        LOGGER.info(
+            "Ingress UI response remote=%s path=%s status=%s bytes=%s",
+            self.client_address[0],
+            urlparse(self.path).path,
+            int(status),
+            len(body),
+        )
+        self.send_response(int(status))
+        self._send_cors_headers()
+        self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.40
+
+- Add an add-on Web UI for GrowCube device discovery, manual add, remove, and live connection status.
+- Keep static `devices` configuration optional so devices can be configured either from YAML or from the Web UI.
+- Return connection, error, and GrowCube firmware version details in the dashboard API payload.
+
 ## 0.2.39
 
 - Publish `first_watering_time_*` as MQTT `time` entities instead of text entities to match the HACS integration.

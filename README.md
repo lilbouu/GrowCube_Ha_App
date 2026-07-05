@@ -2,9 +2,8 @@
 
 Home Assistant OS add-on backend for GrowCube devices.
 
-This project is separate from the existing Home Assistant custom integration in:
-
-`/Users/vladislav/esp/HomeAssistant_Growcube_Integration`
+This project is separate from the existing Home Assistant GrowCube custom
+integration used as the protocol and UI reference.
 
 The goal is to build an add-on that can be installed from a GitHub add-on
 repository URL and started from HAOS. The add-on connects to GrowCube devices
@@ -26,6 +25,7 @@ The first add-on version includes:
 - `GrowCube` add-on packaging
 - standalone Python backend bridge with no third-party Python dependencies
 - manual GrowCube add by host/IP
+- add-on Web UI for GrowCube discovery, add/remove, and connection status
 - direct TCP connection to GrowCube on port `8800`
 - MQTT Discovery for Home Assistant entities
 - temperature and humidity sensors
@@ -44,7 +44,8 @@ Publish this folder as a GitHub repository, then in Home Assistant OS:
 3. Paste the GitHub repository URL for this project.
 4. Find **GrowCube** in the add-on store.
 5. Install it.
-6. Configure one or more GrowCube devices by IP address or hostname.
+6. Configure MQTT credentials. `devices` can be left empty if you want to add
+   GrowCube devices from the add-on Web UI.
 7. Start it.
 
 The add-on connects directly to each device. It does not require the Home
@@ -110,13 +111,13 @@ The GrowCube add-on log should contain:
 
 ```text
 GrowCube Lovelace card copied to /homeassistant/www/growcube/growcube-card.js
-GrowCube Lovelace card copied to /homeassistant/www/growcube/growcube-card-0.2.39.js
+GrowCube Lovelace card copied to /homeassistant/www/growcube/growcube-card-0.2.40.js
 ```
 
 Home Assistant serves that file as:
 
 ```text
-/local/growcube/growcube-card-0.2.39.js
+/local/growcube/growcube-card-0.2.40.js
 ```
 
 If this URL returns `404 Not Found`, check that the log line above is present.
@@ -130,7 +131,7 @@ Add it as a Lovelace resource:
 3. Add a JavaScript module resource:
 
 ```text
-/local/growcube/growcube-card-0.2.39.js
+/local/growcube/growcube-card-0.2.40.js
 ```
 
 Then create or edit a dashboard and add a manual card:
