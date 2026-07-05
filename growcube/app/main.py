@@ -1904,6 +1904,8 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
                 self._write_html(web_ui_html())
             elif parsed.path == "/health":
                 self._write_json({"ok": True})
+            elif parsed.path == "/growcube-card.js" or re.fullmatch(r"/growcube-card-\d+\.\d+\.\d+\.js", parsed.path):
+                self._write_javascript(rendered_lovelace_card())
             elif parsed.path == "/plants/search":
                 query = first_query_value(params, "query")
                 plants = search_plants(query)
@@ -2005,6 +2007,23 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
         self.send_response(int(status))
         self._send_cors_headers()
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _write_javascript(self, script: str, status: HTTPStatus = HTTPStatus.OK) -> None:
+        body = script.encode("utf-8")
+        LOGGER.info(
+            "Ingress JavaScript response remote=%s path=%s status=%s bytes=%s",
+            self.client_address[0],
+            urlparse(self.path).path,
+            int(status),
+            len(body),
+        )
+        self.send_response(int(status))
+        self._send_cors_headers()
+        self.send_header("Content-Type", "text/javascript; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -2288,6 +2307,13 @@ def install_lovelace_card() -> None:
         return
     card_source = rendered_lovelace_card()
     card_version = lovelace_card_version(card_source)
+    ingress_url = cached_supervisor_ingress_url()
+    if ingress_url:
+        LOGGER.info(
+            "GrowCube Lovelace card ingress resource: %s/growcube-card-%s.js",
+            ingress_url,
+            card_version or "latest",
+        )
     copied = False
     for target_path in CARD_TARGET_PATHS:
         if not target_path.parent.parent.exists():

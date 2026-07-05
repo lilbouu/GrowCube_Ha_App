@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.48
+
+- Serve the Lovelace card directly from the add-on ingress API when Home Assistant does not mount `/config` into the add-on container.
+- Log a ready-to-use ingress Lovelace resource URL during startup.
+
 ## 0.2.47
 
 - Restore the add-on mount layout that worked in earlier builds: `addon_config:rw` plus `config:rw`.
