@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.35
+
+- Bump the add-on and Lovelace card asset version after the 0.2.34 card copy was not visible in Home Assistant.
+- Derive the versioned Lovelace card filename from the JavaScript card version so future releases do not miss the copied `growcube-card-*.js` asset.
+
 ## 0.2.34
 
 - Render saved plant photos in the summary and detail card headers instead of falling back to the flower icon after a plant is added.

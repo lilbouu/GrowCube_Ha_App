@@ -10,6 +10,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import shutil
 import threading
 import time
@@ -50,7 +51,6 @@ OPTIONS_PATH = DATA_DIR / "options.json"
 APP_DIR = Path(__file__).parent
 CARD_SOURCE_PATH = APP_DIR / "www" / "growcube-card.js"
 CARD_IMAGE_SOURCE_DIR = APP_DIR / "www" / "images"
-CARD_VERSION = "0.2.34"
 CARD_API_URL_PLACEHOLDER = "__GROWCUBE_ADDON_API_URL__"
 DEFAULT_INGRESS_PORT = 8099
 CLOUD_CATALOG_HOSTS = ("https://api.growcube.cc", "http://api.growcube.cc")
@@ -1563,6 +1563,7 @@ def install_lovelace_card() -> None:
         LOGGER.warning("GrowCube Lovelace card source is missing: %s", CARD_SOURCE_PATH)
         return
     card_source = rendered_lovelace_card()
+    card_version = lovelace_card_version(card_source)
     copied = False
     for target_path in CARD_TARGET_PATHS:
         if not target_path.parent.parent.exists():
@@ -1572,9 +1573,12 @@ def install_lovelace_card() -> None:
             target_path.parent.mkdir(parents=True, exist_ok=True)
             target_path.write_text(card_source, encoding="utf-8")
             LOGGER.info("GrowCube Lovelace card copied to %s", target_path)
-            versioned_target_path = target_path.with_name(f"growcube-card-{CARD_VERSION}.js")
-            versioned_target_path.write_text(card_source, encoding="utf-8")
-            LOGGER.info("GrowCube Lovelace card copied to %s", versioned_target_path)
+            if card_version:
+                versioned_target_path = target_path.with_name(f"growcube-card-{card_version}.js")
+                versioned_target_path.write_text(card_source, encoding="utf-8")
+                LOGGER.info("GrowCube Lovelace card copied to %s", versioned_target_path)
+            else:
+                LOGGER.warning("GrowCube Lovelace card version was not detected; versioned card copy skipped")
             if CARD_IMAGE_SOURCE_DIR.is_dir():
                 shutil.copytree(
                     CARD_IMAGE_SOURCE_DIR,
@@ -1597,6 +1601,11 @@ def rendered_lovelace_card() -> str:
     else:
         LOGGER.warning("GrowCube ingress URL was not discovered; card will use fallback API paths")
     return source.replace(CARD_API_URL_PLACEHOLDER, api_url)
+
+
+def lovelace_card_version(card_source: str) -> str:
+    match = re.search(r'GROWCUBE_CARD_VERSION\s*=\s*["\'](\d+\.\d+\.\d+)', card_source)
+    return match.group(1) if match else ""
 
 
 def cached_supervisor_ingress_url() -> str:
