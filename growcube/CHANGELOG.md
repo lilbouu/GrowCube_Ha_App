@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.46
+
+- Mount the Home Assistant configuration directory with the standard `config:rw` add-on map so the Lovelace card can be copied to `/config/www/growcube`.
+
 ## 0.2.45
 
 - Keep GrowCube discovery from failing when a probe connection is reset by a device or emulator during TCP close.
