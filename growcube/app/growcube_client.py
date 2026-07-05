@@ -60,6 +60,32 @@ class PumpReport(Report):
 
 
 @dataclass(frozen=True, slots=True)
+class WateringExceptionReport(Report):
+    channel: int
+
+
+@dataclass(frozen=True, slots=True)
+class OutletBlockedReport(Report):
+    channel: int
+
+
+@dataclass(frozen=True, slots=True)
+class SensorDisconnectedReport(Report):
+    channel: int
+
+
+@dataclass(frozen=True, slots=True)
+class LockStateReport(Report):
+    locked: bool
+    reason: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class WateringLockedReport(Report):
+    channel: int
+
+
+@dataclass(frozen=True, slots=True)
 class MoistureHistoryReport(Report):
     channel: int
     year: int
@@ -271,6 +297,23 @@ def report_from_message(command: int, payload: str, raw: str) -> Report:
             return DeviceVersionReport(command, raw, version, device_id)
         if command in (26, 27):
             return PumpReport(command, raw, channel=int(payload), open=command == 26)
+        if command == 28:
+            return WateringExceptionReport(command, raw, channel=int(payload))
+        if command == 29:
+            return OutletBlockedReport(command, raw, channel=int(payload))
+        if command == 30:
+            return SensorDisconnectedReport(command, raw, channel=int(payload))
+        if command == 33:
+            parts = _split_ints(payload)
+            if parts:
+                return LockStateReport(
+                    command,
+                    raw,
+                    locked=parts[0] == 1,
+                    reason=parts[1] if len(parts) > 1 else 0,
+                )
+        if command == 34:
+            return WateringLockedReport(command, raw, channel=int(payload))
         if command in (35, 36):
             parts = _split_ints(payload)
             if len(parts) >= 2:

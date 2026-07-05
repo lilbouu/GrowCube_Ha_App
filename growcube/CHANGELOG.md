@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.44
+
+- Handle GrowCube watering exception, outlet blocked, sensor disconnected, device lock, and watering locked reports like the HACS integration.
+- Store GrowCube history and watering record timestamps with the local timezone to match HACS chart behavior.
+
+## 0.2.43
+
+- Keep plant photos visible after a hard browser reload by caching resolved image URLs per device and channel.
+- Reuse cached plant photos when the card initially starts from MQTT-discovered entities before dashboard metadata arrives.
+
 ## 0.2.42
 
 - Bump the add-on metadata to match the updated Lovelace card asset version.

@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.42-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.44-addon-compat";
 const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
@@ -141,6 +141,7 @@ class GrowcubeCard extends HTMLElement {
       image_url: this._plantImageUrl(values.image_url || values.photo_url || record.channels[channel]?.image_url || record.channels[channel]?.photo_url || ""),
       configured: values.configured ?? record.channels[channel]?.configured ?? true,
     };
+    this._rememberPlantPhotoUrl(record.device_id, channel, record.channels[channel].image_url || record.channels[channel].photo_url);
   }
 
   _deviceRecords() {
@@ -451,6 +452,7 @@ class GrowcubeCard extends HTMLElement {
           photo_url_entity: nextChannel.photo_url_entity || previousChannel.photo_url_entity || "",
           configured: nextChannel.configured ?? previousChannel.configured,
         };
+        this._rememberPlantPhotoUrl(device?.device_id, channel, channels[channel].image_url || channels[channel].photo_url);
       });
       return {
         ...device,
@@ -1137,7 +1139,12 @@ class GrowcubeCard extends HTMLElement {
 
   _currentPlantPhotoUrl(channel = this._channelKey()) {
     const channelMeta = this._deviceRecord()?.channels?.[channel] || {};
-    return this._resolvedPlantPhotoUrl(channelMeta.image_url, channelMeta.photo_url, this._entities(channel).photo_url);
+    return this._resolvedPlantPhotoUrl(
+      channelMeta.image_url,
+      channelMeta.photo_url,
+      this._entities(channel).photo_url,
+      this._cachedPlantPhotoUrl(this._deviceRecord()?.device_id, channel),
+    );
   }
 
   _modeOptions() {
@@ -1881,6 +1888,31 @@ class GrowcubeCard extends HTMLElement {
 
   _plantImageUrl(value) {
     return this._normalizePlantImageUrl(value);
+  }
+
+  _plantPhotoCacheKey(deviceId, channel) {
+    const device = String(deviceId || this._selectedDeviceId() || this._deviceIdHint() || "growcube").trim();
+    return `growcube-photo:${device}:${this._channelKey(channel)}`;
+  }
+
+  _rememberPlantPhotoUrl(deviceId, channel, value) {
+    const url = this._plantImageUrl(value);
+    if (!url) {
+      return;
+    }
+    try {
+      window.localStorage?.setItem(this._plantPhotoCacheKey(deviceId, channel), url);
+    } catch (error) {
+      // Browser storage can be unavailable in some Home Assistant webviews.
+    }
+  }
+
+  _cachedPlantPhotoUrl(deviceId, channel) {
+    try {
+      return this._plantImageUrl(window.localStorage?.getItem(this._plantPhotoCacheKey(deviceId, channel)) || "");
+    } catch (error) {
+      return "";
+    }
   }
 
   _resolvedPlantPhotoUrl(...values) {
@@ -3696,7 +3728,13 @@ class GrowcubeCard extends HTMLElement {
   }
 
   _plantRowTemplate({ channel, entities, deviceId = "", metadata = {} }) {
-    const photoUrl = this._resolvedPlantPhotoUrl(metadata.image_url, metadata.photo_url, entities.photo_url);
+    const photoUrl = this._resolvedPlantPhotoUrl(
+      metadata.image_url,
+      metadata.photo_url,
+      entities.photo_url,
+      this._cachedPlantPhotoUrl(deviceId, channel),
+    );
+    this._rememberPlantPhotoUrl(deviceId, channel, photoUrl);
     const name = metadata.plant_name || this._entityDisplay(entities.name, this._channelName(channel));
     const moisture = this._entityDisplay(entities.moisture, "Unknown");
     const mode = this._normalizeMode(this._entityState(entities.mode, "Disabled"));
@@ -4065,7 +4103,9 @@ class GrowcubeCard extends HTMLElement {
       channelMeta.photo_url,
       data.entities.photo_url,
       this._catalogImageUrl(this._plantWizardSelected || {}),
+      this._cachedPlantPhotoUrl(this._deviceRecord()?.device_id, this._channelKey()),
     );
+    this._rememberPlantPhotoUrl(this._deviceRecord()?.device_id, this._channelKey(), photoUrl);
     const statCards = [
       this._profileStatTemplate("Soil moisture", this._rangeText(data.smartMinMoisture, data.smartMaxMoisture, "%")),
       this._hasRange(profile.tempMin, profile.tempMax)

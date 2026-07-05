@@ -30,13 +30,18 @@ from growcube_client import (
     DeviceVersionReport,
     GrowCubeClient,
     HistoryCompleteReport,
+    LockStateReport,
     MoistureHistoryReport,
     MoistureReport,
+    OutletBlockedReport,
     PumpReport,
     Report,
+    SensorDisconnectedReport,
     TankForecastReport,
     TankStateReport,
     WaterStateReport,
+    WateringExceptionReport,
+    WateringLockedReport,
     WateringRecordReport,
 )
 from growcube_protocol import scheduled_watering_payload, watering_mode_payload
@@ -1050,6 +1055,8 @@ class GrowCubeManager:
             elif isinstance(report, MoistureReport) and 0 <= report.channel < len(state.channels):
                 channel = state.channels[report.channel]
                 channel.moisture = report.moisture
+                channel.sensor_fault = False
+                channel.sensor_disconnected = False
                 if report.humidity is not None:
                     state.humidity = report.humidity
                 if report.temperature is not None:
@@ -1077,6 +1084,29 @@ class GrowCubeManager:
                                 channel.watering_events,
                                 key=lambda item: item["timestamp"],
                             )[-128:]
+            elif isinstance(report, WateringExceptionReport) and 0 <= report.channel < len(state.channels):
+                channel = state.channels[report.channel]
+                channel.watering_issue = True
+            elif isinstance(report, OutletBlockedReport) and 0 <= report.channel < len(state.channels):
+                channel = state.channels[report.channel]
+                channel.outlet_blocked = True
+            elif isinstance(report, SensorDisconnectedReport) and 0 <= report.channel < len(state.channels):
+                channel = state.channels[report.channel]
+                channel.moisture = None
+                channel.sensor_disconnected = True
+            elif isinstance(report, LockStateReport):
+                state.device_locked = report.locked
+                if report.locked and report.reason == 1:
+                    state.water_warning = True
+                if not report.locked:
+                    for channel in state.channels:
+                        channel.outlet_locked = False
+                        channel.watering_issue = False
+                        channel.watering_locked = False
+            elif isinstance(report, WateringLockedReport) and 0 <= report.channel < len(state.channels):
+                channel = state.channels[report.channel]
+                channel.watering_issue = True
+                channel.watering_locked = True
             elif isinstance(report, MoistureHistoryReport) and 0 <= report.channel < len(state.channels):
                 channel = state.channels[report.channel]
                 existing = {point["timestamp"]: point for point in channel.history}
@@ -1089,7 +1119,7 @@ class GrowCubeManager:
                             report.month,
                             report.day,
                             hour,
-                            tzinfo=timezone.utc,
+                            tzinfo=local_timezone(),
                         ).isoformat()
                     except ValueError:
                         continue
@@ -1100,7 +1130,7 @@ class GrowCubeManager:
                 channel.history = sorted(existing.values(), key=lambda item: item["timestamp"])[-24 * 30 :]
             elif isinstance(report, WateringRecordReport) and 0 <= report.channel < len(state.channels):
                 channel = state.channels[report.channel]
-                timestamp = report.timestamp.replace(tzinfo=timezone.utc).isoformat()
+                timestamp = report.timestamp.replace(tzinfo=local_timezone()).isoformat()
                 channel.last_watering = timestamp
                 if all(abs_iso_seconds(item.get("timestamp"), timestamp) > 30 for item in channel.watering_events):
                     source = "timed" if channel.config.mode == "Repeating" else "smart" if channel.config.mode == "Smart" else "last"
@@ -1437,6 +1467,10 @@ def channel_from_key(key: str) -> int | None:
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def local_timezone():
+    return datetime.now().astimezone().tzinfo or timezone.utc
 
 
 def abs_iso_seconds(first: Any, second: Any) -> float:
