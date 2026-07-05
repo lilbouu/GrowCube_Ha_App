@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.27-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.30-addon-compat";
 const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
@@ -1050,6 +1050,22 @@ class GrowcubeCard extends HTMLElement {
     return `${dateText} ${timeText}`;
   }
 
+  _entityTimeValue(entityId, fallback = "") {
+    const value = this._entityState(entityId, "");
+    if (value && value !== "unknown" && value !== "unavailable") {
+      return value;
+    }
+    return fallback;
+  }
+
+  _firstWateringValue(entities) {
+    const configured = this._entityTimeValue(entities.first_watering_time, "");
+    if (configured) {
+      return configured;
+    }
+    return this._entityTimeValue(entities.next_watering, "");
+  }
+
   _number(entityId, fallback = 0) {
     const value = Number(this._entityState(entityId, fallback));
     return Number.isFinite(value) ? value : fallback;
@@ -1304,7 +1320,7 @@ class GrowcubeCard extends HTMLElement {
   _openModeWizard() {
     const entities = this._entities();
     const mode = this._normalizeMode(this._entityState(entities.mode, "Smart"));
-    const [hour, minute] = this._splitTime(this._entityState(entities.first_watering_time, ""));
+    const [hour, minute] = this._splitTime(this._firstWateringValue(entities));
     this._modeWizardMode = mode === "Repeating" ? "Repeating" : "Smart";
     this._modeWizardAmount = this._clamp(this._number(entities.duration, 50), 10, 500);
     this._modeWizardIntervalDays = this._clamp(Math.max(1, Math.round(this._number(entities.interval, 24) / 24)), 1, 10);
@@ -1647,8 +1663,8 @@ class GrowcubeCard extends HTMLElement {
       name: String(plant?.name || ""),
       display_name: String(plant?.display_name || plant?.name || ""),
       category: String(plant?.category || ""),
-      description: this._truncateText(String(plant?.description || ""), 420),
-      image_url: String(plant?.image || ""),
+      description: String(plant?.description || "").trim(),
+      image_url: this._normalizePlantImageUrl(plant?.image),
       moisture_min: this._clamp(Number(plant?.min_soil_moist) || 30, 0, 100),
       moisture_max: this._clamp(Number(plant?.max_soil_moist) || 60, 0, 100),
       temp_min: Number(plant?.min_temp) || 0,
@@ -1687,7 +1703,7 @@ class GrowcubeCard extends HTMLElement {
     this._plantWizardSelected = item;
     this._plantWizardCustom = false;
     this._plantWizardName = item.display_name || item.name || this._plantWizardName;
-    this._plantWizardPhotoUrl = item.image_url || "";
+    this._plantWizardPhotoUrl = this._plantImageUrl(item.image_url);
     this._plantWizardMode = "Smart";
     this._plantWizardSmartMin = this._clamp(Number(item.moisture_min) || 20, 1, 98);
     this._plantWizardSmartMax = this._clamp(Number(item.moisture_max) || 60, this._plantWizardSmartMin + 1, 99);
@@ -1761,12 +1777,28 @@ class GrowcubeCard extends HTMLElement {
     return String(value || "").trim();
   }
 
-  _truncateText(value, limit) {
+  _normalizePlantImageUrl(value) {
     const text = String(value || "").trim();
-    if (text.length <= limit) {
+    if (!text) {
+      return "";
+    }
+    if (text.startsWith("//")) {
+      return `https:${text}`;
+    }
+    if (/^http:\/\//i.test(text)) {
+      return `https://${text.slice("http://".length)}`;
+    }
+    if (/^https:\/\//i.test(text)) {
       return text;
     }
-    return `${text.slice(0, limit).trimEnd()}...`;
+    if (text.startsWith("/")) {
+      return `https://api.growcube.cc${text}`;
+    }
+    return `https://api.growcube.cc/${text.replace(/^\/+/, "")}`;
+  }
+
+  _plantImageUrl(value) {
+    return this._normalizePlantImageUrl(value);
   }
 
   _profileHasDetails(profile) {
@@ -1776,6 +1808,10 @@ class GrowcubeCard extends HTMLElement {
       || this._hasRange(profile.tempMin, profile.tempMax)
       || this._hasRange(profile.airHumidityMin, profile.airHumidityMax)
     );
+  }
+
+  _profileDescriptionLooksTruncated(value) {
+    return this._normalizeProfileText(value).endsWith("...");
   }
 
   _selectCatalogProfile(results, plantName) {
@@ -1793,7 +1829,7 @@ class GrowcubeCard extends HTMLElement {
 
   async _ensureAboutProfileData(entities) {
     const current = this._profileMetadata(entities);
-    if (this._profileHasDetails(current)) {
+    if (this._profileHasDetails(current) && !this._profileDescriptionLooksTruncated(current.description)) {
       return;
     }
     const plantName = this._plantName();
@@ -1828,9 +1864,15 @@ class GrowcubeCard extends HTMLElement {
     const historyState = this._detailHistoryState(entities);
     const attrs = historyState?.attributes || {};
     const fallback = this._aboutProfileCache[this._aboutProfileCacheKey()] || {};
+    const attrDescription = this._normalizeProfileText(attrs.type_description);
+    const fallbackDescription = this._normalizeProfileText(fallback.description);
     return {
       category: this._normalizeProfileText(attrs.type_category) || this._normalizeProfileText(fallback.category),
-      description: this._normalizeProfileText(attrs.type_description) || this._normalizeProfileText(fallback.description),
+      description: (
+        this._profileDescriptionLooksTruncated(attrDescription) && fallbackDescription
+          ? fallbackDescription
+          : attrDescription || fallbackDescription
+      ),
       tempMin: Number(attrs.temp_min) || Number(fallback.tempMin) || 0,
       tempMax: Number(attrs.temp_max) || Number(fallback.tempMax) || 0,
       airHumidityMin: Number(attrs.air_humidity_min) || Number(fallback.airHumidityMin) || 0,
@@ -1859,7 +1901,7 @@ class GrowcubeCard extends HTMLElement {
     const next = this._nextWateringDisplay(entities.next_watering, "Unknown");
     const moisture = this._entityDisplay(entities.moisture, "Unknown");
     const manualDuration = this._number(entities.manual_duration, 50);
-    const firstWatering = this._entityState(entities.first_watering_time, "");
+    const firstWatering = this._firstWateringValue(entities);
     const [firstWateringHour, firstWateringMinute] = this._splitTime(firstWatering);
     const scheduleDuration = this._number(entities.duration, 10);
     const interval = this._number(entities.interval, 24);
@@ -3511,7 +3553,7 @@ class GrowcubeCard extends HTMLElement {
   }
 
   _plantRowTemplate({ channel, entities, deviceId = "" }) {
-    const photoUrl = this._entityState(entities.photo_url, "");
+    const photoUrl = this._plantImageUrl(this._entityState(entities.photo_url, ""));
     const name = this._entityDisplay(entities.name, this._channelName(channel));
     const moisture = this._entityDisplay(entities.moisture, "Unknown");
     const mode = this._normalizeMode(this._entityState(entities.mode, "Disabled"));
@@ -3869,7 +3911,7 @@ class GrowcubeCard extends HTMLElement {
   _aboutDialogTemplate(data, profile) {
     const aboutText = profile.description || (this._aboutProfileLoading ? "Loading plant information..." : "No plant information is available for this profile yet.");
     const category = profile.category || "Plant profile";
-    const photoUrl = this._entityState(data.entities.photo_url, "");
+    const photoUrl = this._plantImageUrl(this._entityState(data.entities.photo_url, ""));
     const statCards = [
       this._profileStatTemplate("Soil moisture", this._rangeText(data.smartMinMoisture, data.smartMaxMoisture, "%")),
       this._hasRange(profile.tempMin, profile.tempMax)
@@ -4663,11 +4705,12 @@ class GrowcubeCard extends HTMLElement {
     const item = this._plantWizardSelected || {};
     const name = item.display_name || item.name || this._plantWizardName || "Unknown plant";
     const about = item.description || "No catalog description is available for this plant.";
+    const imageUrl = this._plantImageUrl(item.image_url);
     return `
       <div class="profile-panel">
         <div class="profile-hero">
           <div class="profile-photo">
-            ${item.image_url ? `<img src="${this._escape(item.image_url)}" alt="">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
+            ${imageUrl ? `<img src="${this._escape(imageUrl)}" alt="">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
           </div>
           <div>
             <div class="title">${this._escape(name)}</div>
@@ -4759,10 +4802,11 @@ class GrowcubeCard extends HTMLElement {
   }
 
   _plantWizardReviewStep() {
+    const photoUrl = this._plantImageUrl(this._plantWizardPhotoUrl);
     return `
       <div class="wizard-review">
         <div class="plant-photo">
-          ${this._plantWizardPhotoUrl ? `<img src="${this._escape(this._plantWizardPhotoUrl)}" alt="">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
+          ${photoUrl ? `<img src="${this._escape(photoUrl)}" alt="">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
         </div>
         <div>
           <div class="title">${this._escape(this._plantWizardName || "New plant")}</div>
@@ -4775,10 +4819,11 @@ class GrowcubeCard extends HTMLElement {
 
   _catalogResultTemplate(item, index) {
     const name = item.display_name || item.name || "Unknown plant";
+    const imageUrl = this._plantImageUrl(item.image_url);
     return `
       <div class="plant-row" data-action="select-catalog-plant" data-index="${index}" role="button" tabindex="0">
         <div class="plant-photo">
-          ${item.image_url ? `<img src="${this._escape(item.image_url)}" alt="">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
+          ${imageUrl ? `<img src="${this._escape(imageUrl)}" alt="">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
         </div>
         <div class="plant-meta">
           <div class="title">${this._escape(name)}</div>
@@ -4867,7 +4912,7 @@ class GrowcubeCard extends HTMLElement {
     const kind = this._editDialog?.kind;
     const entities = this._entities();
     const mode = this._normalizeMode(this._entityState(entities.mode, "Smart"));
-    const [hour, minute] = this._splitTime(this._entityState(entities.first_watering_time, ""));
+    const [hour, minute] = this._splitTime(this._firstWateringValue(entities));
     const currentDays = Math.max(1, Math.round(this._number(entities.interval, 24) / 24));
     const modeOptions = this._modeOptions()
       .map((option) => `<option value="${this._escape(option)}" ${this._normalizeMode(option) === mode ? "selected" : ""}>${this._escape(this._modeDisplay(option))}</option>`)
@@ -4992,6 +5037,18 @@ class GrowcubeCard extends HTMLElement {
 
   _editValue(field) {
     return this.shadowRoot.querySelector(`[data-edit-field="${field}"]`)?.value;
+  }
+
+  _currentTimedWateringValues(entities, overrides = {}) {
+    const [hour, minute] = this._splitTime(this._firstWateringValue(entities));
+    const firstTime = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00`;
+    return {
+      mode: "Repeating",
+      first_watering_time: firstTime,
+      amount_ml: this._clamp(this._number(entities.duration, 50), 10, 500),
+      interval_hours: this._clamp(this._number(entities.interval, 24), 1, 240),
+      ...overrides,
+    };
   }
 
   _deletePlantDialogTemplate() {
@@ -5162,6 +5219,7 @@ class GrowcubeCard extends HTMLElement {
           await this._setTime(entities.first_watering_time, firstTime);
         }
         await this._saveScheduleAfterEdit("First watering updated", {
+          ...this._currentTimedWateringValues(entities),
           first_watering_time: firstTime,
         });
       } else if (kind === "schedule") {
@@ -5174,6 +5232,7 @@ class GrowcubeCard extends HTMLElement {
           await this._setNumber(entities.interval, intervalHours);
         }
         await this._saveScheduleAfterEdit("Schedule updated", {
+          ...this._currentTimedWateringValues(entities),
           amount_ml: amount,
           interval_hours: intervalHours,
         });
@@ -5722,8 +5781,13 @@ class GrowcubeCard extends HTMLElement {
   }
 
   _splitTime(value) {
-    const match = String(value || "").match(/^(\d{1,2}):(\d{1,2})/);
+    const text = String(value || "");
+    const match = text.match(/^(\d{1,2}):(\d{1,2})/);
     if (!match) {
+      const date = new Date(text);
+      if (!Number.isNaN(date.getTime())) {
+        return [date.getHours(), date.getMinutes()];
+      }
       return [8, 0];
     }
     return [

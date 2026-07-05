@@ -50,13 +50,12 @@ OPTIONS_PATH = DATA_DIR / "options.json"
 APP_DIR = Path(__file__).parent
 CARD_SOURCE_PATH = APP_DIR / "www" / "growcube-card.js"
 CARD_IMAGE_SOURCE_DIR = APP_DIR / "www" / "images"
-CARD_VERSION = "0.2.27"
+CARD_VERSION = "0.2.30"
 CARD_API_URL_PLACEHOLDER = "__GROWCUBE_ADDON_API_URL__"
 DEFAULT_INGRESS_PORT = 8099
 CLOUD_CATALOG_HOSTS = ("https://api.growcube.cc", "http://api.growcube.cc")
 CLOUD_CATALOG_LIMIT = 40
 CLOUD_CATALOG_TIMEOUT_SECONDS = 45
-PLANT_DESCRIPTION_LIMIT = 420
 _PLANT_SEARCH_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 PLANT_SEARCH_CACHE_TTL_SECONDS = 15 * 60
 _SUPERVISOR_INGRESS_URL_CACHE: str | None = None
@@ -66,6 +65,7 @@ CARD_TARGET_PATHS = (
     Path("/config/www/growcube/growcube-card.js"),
 )
 CHANNEL_NAMES = ("A", "B", "C", "D")
+TANK_UNUSABLE_RESERVE_ML = 200
 
 
 @dataclass(slots=True)
@@ -129,6 +129,7 @@ class DeviceState:
     tank_capacity_ml: int = 1500
     tank_remaining_ml: int = 1500
     tank_used_ml: int = 0
+    tank_forecast: dict[str, Any] = field(default_factory=dict)
     updated_at: str | None = None
     channels: list[ChannelState] = field(default_factory=lambda: [ChannelState() for _ in range(4)])
 
@@ -436,6 +437,7 @@ class GrowCubeManager:
                 interval,
                 start_time.isoformat(),
             )
+            await self._reset_watering_mode(runtime, channel)
             await runtime.client.send(Command(51, scheduled_watering_payload(channel, duration, interval, start_time)))
         elif mode == "Smart":
             smart_mode = 3 if config.smart_daytime_watering else 2
@@ -448,6 +450,7 @@ class GrowCubeManager:
                 config.smart_max_moisture,
                 config.smart_daytime_watering,
             )
+            await self._reset_watering_mode(runtime, channel)
             await runtime.client.send(
                 Command(
                     49,
@@ -461,7 +464,14 @@ class GrowCubeManager:
             )
         else:
             LOGGER.info("Disable watering device=%s channel=%s", self.devices[device_id].host, CHANNEL_NAMES[channel])
-            await runtime.client.send(Command(49, watering_mode_payload(channel, 0, 0, 0)))
+            await self._reset_watering_mode(runtime, channel)
+
+    async def _reset_watering_mode(self, runtime: DeviceRuntime, channel: int) -> None:
+        if runtime.client is None:
+            return
+        await runtime.client.send(Command(47, f"{channel}@0"))
+        await runtime.client.send(Command(46, f"{channel}"))
+        await runtime.client.send(Command(49, watering_mode_payload(channel, 0, 0, 0)))
 
     async def configure_channel(
         self,
@@ -487,7 +497,7 @@ class GrowCubeManager:
                 config.type_category = first_query_value(params, "type_category")[:128]
                 changed.append("type_category updated")
             if query_has(params, "type_description"):
-                config.type_description = first_query_value(params, "type_description")[:2048]
+                config.type_description = first_query_value(params, "type_description")[:10000]
                 changed.append("type_description updated")
             if query_has(params, "temp_min"):
                 config.temp_min = clamp_int(first_query_value(params, "temp_min"), -50, 100, config.temp_min)
@@ -507,11 +517,11 @@ class GrowCubeManager:
                 changed.append(f"mode={config.mode}")
             if query_has(params, "amount_ml"):
                 config.amount_ml = clamp_int(first_query_value(params, "amount_ml"), 10, 500, config.amount_ml)
-                config.duration_seconds = config.amount_ml
+                config.duration_seconds = watering_duration_seconds(config.amount_ml)
                 changed.append(f"amount_ml={config.amount_ml}")
             if query_has(params, "duration_seconds"):
                 config.amount_ml = clamp_int(first_query_value(params, "duration_seconds"), 10, 500, config.amount_ml)
-                config.duration_seconds = config.amount_ml
+                config.duration_seconds = watering_duration_seconds(config.amount_ml)
                 changed.append(f"amount_ml={config.amount_ml}")
             if query_has(params, "interval_hours"):
                 config.interval_hours = clamp_int(first_query_value(params, "interval_hours"), 1, 240, config.interval_hours)
@@ -622,8 +632,8 @@ class GrowCubeManager:
                     config.manual_duration_seconds = clamp_int(payload, 30, 150, config.manual_duration_seconds)
                     changed = f"manual_amount_ml={config.manual_duration_seconds}"
                 elif key.startswith("duration_seconds_"):
-                    config.duration_seconds = clamp_int(payload, 10, 500, config.duration_seconds)
-                    config.amount_ml = config.duration_seconds
+                    config.amount_ml = clamp_int(payload, 10, 500, config.amount_ml)
+                    config.duration_seconds = watering_duration_seconds(config.amount_ml)
                     changed = f"amount_ml={config.amount_ml}"
                 elif key.startswith("interval_hours_"):
                     config.interval_hours = clamp_int(payload, 1, 240, config.interval_hours)
@@ -812,6 +822,21 @@ class GrowCubeManager:
                     state.tank_used_ml,
                 )
             elif isinstance(report, TankForecastReport):
+                state.tank_forecast = {
+                    "known": True,
+                    "flags": report.flags,
+                    "valid_days": report.valid_days,
+                    "confidence": report.confidence,
+                    "smart_daily_x10": report.smart_daily_x10,
+                    "manual_daily_x10": report.manual_daily_x10,
+                    "unknown_daily_x10": report.unknown_daily_x10,
+                    "smart_events": report.smart_events,
+                    "manual_events": report.manual_events,
+                    "unknown_events": report.unknown_events,
+                    "today_smart_ml": report.today_smart_ml,
+                    "today_manual_ml": report.today_manual_ml,
+                    "today_unknown_ml": report.today_unknown_ml,
+                }
                 LOGGER.info(
                     "Tank forecast device=%s valid_days=%s confidence=%s smart_daily_ml=%.1f manual_daily_ml=%.1f",
                     state.host,
@@ -895,6 +920,7 @@ class GrowCubeManager:
                 channel.watering_events = list(raw_channel.get("watering_events") or [])[-128:]
                 config = raw_channel.get("config")
                 if isinstance(config, dict):
+                    amount_ml = clamp_int(config.get("amount_ml"), 10, 500, 50)
                     channel.config = ChannelConfig(
                         configured=bool(config.get("configured", channel.plant_configured)),
                         plant_name=str(config.get("plant_name") or ""),
@@ -907,8 +933,8 @@ class GrowCubeManager:
                         air_humidity_max=clamp_int(config.get("air_humidity_max"), 0, 100, 0),
                         mode=str(config.get("mode") or "Disabled"),
                         manual_duration_seconds=clamp_int(config.get("manual_duration_seconds"), 30, 150, 50),
-                        duration_seconds=clamp_int(config.get("duration_seconds"), 10, 500, 10),
-                        amount_ml=clamp_int(config.get("amount_ml"), 10, 500, 50),
+                        duration_seconds=watering_duration_seconds(amount_ml),
+                        amount_ml=amount_ml,
                         interval_hours=clamp_int(config.get("interval_hours"), 1, 240, 24),
                         first_watering_time=normalize_time(config.get("first_watering_time"), "08:00:00"),
                         smart_min_moisture=clamp_int(config.get("smart_min_moisture"), 1, 98, 20),
@@ -938,12 +964,16 @@ class GrowCubeManager:
             tank_capacity_ml=clamp_int(item.get("tank_capacity_ml"), 500, 50000, 1500),
             tank_remaining_ml=clamp_int(item.get("tank_remaining_ml"), 0, 50000, 1500),
             tank_used_ml=clamp_int(item.get("tank_used_ml"), 0, 50000, 0),
+            tank_forecast=item.get("tank_forecast") if isinstance(item.get("tank_forecast"), dict) else {},
             updated_at=item.get("updated_at"),
             channels=channels,
         )
 
     @staticmethod
     def _state_to_dict(state: DeviceState) -> dict[str, Any]:
+        daily_usage_ml = estimated_daily_usage_ml(state)
+        usable_remaining_ml = max(0, state.tank_remaining_ml - TANK_UNUSABLE_RESERVE_ML)
+        tank_days_left = round(usable_remaining_ml / daily_usage_ml, 1) if daily_usage_ml > 0 else None
         return {
             "id": state.id,
             "name": state.name,
@@ -963,7 +993,11 @@ class GrowCubeManager:
             "tank_remaining_ml": state.tank_remaining_ml,
             "tank_level": round(state.tank_remaining_ml / max(1, state.tank_capacity_ml) * 100),
             "tank_used_ml": state.tank_used_ml,
-            "tank_days_left": None,
+            "tank_days_left": tank_days_left,
+            "tank_daily_usage_ml": round(daily_usage_ml, 1) if daily_usage_ml > 0 else None,
+            "tank_unusable_reserve_ml": TANK_UNUSABLE_RESERVE_ML,
+            "tank_usable_remaining_ml": usable_remaining_ml,
+            "tank_forecast": state.tank_forecast,
             "updated_at": state.updated_at,
             "channels": [
                 {
@@ -1112,6 +1146,56 @@ def datetime_from_growcube_local_epoch(epoch: int) -> datetime | None:
         utc_components.second,
         tzinfo=datetime.now().astimezone().tzinfo,
     )
+
+
+def estimated_daily_usage_ml(state: DeviceState) -> float:
+    forecast_usage = firmware_forecast_daily_usage_ml(state)
+    if forecast_usage is not None:
+        return forecast_usage
+
+    usage = 0.0
+    for channel in state.channels:
+        config = channel.config
+        if not config.configured or config.mode != "Repeating":
+            continue
+        if config.amount_ml <= 0 or config.interval_hours <= 0:
+            continue
+        usage += config.amount_ml * 24 / max(config.interval_hours, 1)
+    return usage
+
+
+def firmware_forecast_daily_usage_ml(state: DeviceState) -> float | None:
+    forecast = state.tank_forecast or {}
+    if (
+        not smart_watering_active(state)
+        or not bool(forecast.get("known"))
+        or int(forecast.get("valid_days") or 0) <= 0
+        or int(forecast.get("smart_events") or 0) <= 0
+    ):
+        return None
+    usage_x10 = timed_daily_usage_x10(state)
+    usage_x10 += max(0, int(forecast.get("smart_daily_x10") or 0))
+    usage_x10 += max(0, int(forecast.get("unknown_daily_x10") or 0))
+    return usage_x10 / 10
+
+
+def timed_daily_usage_x10(state: DeviceState) -> int:
+    usage_x10 = 0
+    for channel in state.channels:
+        config = channel.config
+        if (
+            not config.configured
+            or config.mode != "Repeating"
+            or config.interval_hours <= 0
+            or config.amount_ml <= 0
+        ):
+            continue
+        usage_x10 += (config.amount_ml * 24 * 10 + config.interval_hours // 2) // config.interval_hours
+    return usage_x10
+
+
+def smart_watering_active(state: DeviceState) -> bool:
+    return any(channel.config.configured and channel.config.mode == "Smart" for channel in state.channels)
 
 
 def next_watering_datetime(value: str) -> datetime:
@@ -1348,8 +1432,8 @@ def plant_from_api(plant: dict[str, Any]) -> dict[str, Any]:
         "name": str_or_empty(plant.get("name")),
         "display_name": str_or_empty(plant.get("display_name")),
         "category": str_or_empty(plant.get("category")),
-        "description": truncate_text(str_or_empty(plant.get("description")), PLANT_DESCRIPTION_LIMIT),
-        "image_url": str_or_empty(plant.get("image")),
+        "description": str_or_empty(plant.get("description")).strip(),
+        "image_url": normalize_catalog_image_url(plant.get("image")),
         "moisture_min": clamp_int(plant.get("min_soil_moist"), 0, 100, 30),
         "moisture_max": clamp_int(plant.get("max_soil_moist"), 0, 100, 60),
         "temp_min": optional_int(plant.get("min_temp")) or 0,
@@ -1363,11 +1447,19 @@ def str_or_empty(value: Any) -> str:
     return value if isinstance(value, str) else ""
 
 
-def truncate_text(value: str, limit: int) -> str:
-    text = value.strip()
-    if len(text) <= limit:
+def normalize_catalog_image_url(value: Any) -> str:
+    text = str_or_empty(value).strip()
+    if not text:
+        return ""
+    if text.startswith("//"):
+        return f"https:{text}"
+    if text.startswith("http://"):
+        return f"https://{text[len('http://'):]}"
+    if text.startswith("https://"):
         return text
-    return f"{text[:limit].rstrip()}..."
+    if text.startswith("/"):
+        return f"https://api.growcube.cc{text}"
+    return f"https://api.growcube.cc/{text}"
 
 
 def dashboard_device_entities(device_id: str) -> dict[str, str]:

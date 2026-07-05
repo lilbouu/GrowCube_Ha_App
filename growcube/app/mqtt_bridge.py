@@ -158,7 +158,25 @@ class MqttBridge:
         await self._sensor(unique_id, "tank_remaining", "Tank remaining", base, device_info, "mL", None, "{{ value_json.tank_remaining_ml }}", "mdi:cup-water")
         await self._sensor(unique_id, "tank_level", "Tank level", base, device_info, "%", None, "{{ value_json.tank_level }}", "mdi:water-percent")
         await self._sensor(unique_id, "tank_used", "Tank used", base, device_info, "mL", None, "{{ value_json.tank_used_ml }}", "mdi:water-minus")
-        await self._sensor(unique_id, "tank_days_left", "Tank days left", base, device_info, "d", None, "{{ value_json.tank_days_left }}", "mdi:calendar-range")
+        await self._sensor(
+            unique_id,
+            "tank_days_left",
+            "Tank days left",
+            base,
+            device_info,
+            "d",
+            None,
+            "{{ value_json.tank_days_left }}",
+            "mdi:calendar-range",
+            (
+                "{"
+                "\"daily_usage_ml\":{{ value_json.tank_daily_usage_ml | tojson }},"
+                "\"usable_remaining_ml\":{{ value_json.tank_usable_remaining_ml | tojson }},"
+                "\"unusable_reserve_ml\":{{ value_json.tank_unusable_reserve_ml | tojson }},"
+                "\"forecast\":{{ value_json.tank_forecast | tojson }}"
+                "}"
+            ),
+        )
         await self._binary(unique_id, "connection_problem", "Connection problem", base, device_info, "{{ 'ON' if not value_json.connected else 'OFF' }}", "problem", "mdi:wifi-alert", "diagnostic")
         await self._binary(unique_id, "device_locked", "Device locked", base, device_info, "{{ 'ON' if value_json.device_locked else 'OFF' }}", "problem", None, "diagnostic")
         await self._binary(unique_id, "water_warning", "Water warning", base, device_info, "{{ 'ON' if value_json.water_warning else 'OFF' }}", "problem", "mdi:water-alert", "diagnostic")
@@ -284,7 +302,7 @@ class MqttBridge:
             await self._button(unique_id, f"add_plant_{channel_id}", f"Add plant {channel_name}", base, device_info, f"add_plant_{channel_id}", "mdi:plus-circle-outline")
             await self._button(unique_id, f"reset_plant_{channel_id}", f"Reset plant {channel_name}", base, device_info, f"reset_plant_{channel_id}", "mdi:delete-outline")
             await self._number(unique_id, f"manual_duration_seconds_{channel_id}", f"Manual watering amount {channel_name}", base, device_info, 30, 150, 10, "mL", "mdi:watering-can", f"{{{{ {channel_base}.config.manual_duration_seconds }}}}")
-            await self._number(unique_id, f"duration_seconds_{channel_id}", f"Watering amount {channel_name}", base, device_info, 10, 500, 10, "mL", "mdi:timer-outline", f"{{{{ {channel_base}.config.duration_seconds }}}}")
+            await self._number(unique_id, f"duration_seconds_{channel_id}", f"Watering amount {channel_name}", base, device_info, 10, 500, 10, "mL", "mdi:timer-outline", f"{{{{ {channel_base}.config.amount_ml }}}}")
             await self._number(unique_id, f"interval_hours_{channel_id}", f"Watering interval {channel_name}", base, device_info, 1, 240, 1, "h", "mdi:calendar-clock", f"{{{{ {channel_base}.config.interval_hours }}}}")
             await self._number(unique_id, f"smart_min_moisture_{channel_id}", f"Minimum moisture {channel_name}", base, device_info, 1, 99, 1, "%", "mdi:water-percent", f"{{{{ {channel_base}.config.smart_min_moisture }}}}")
             await self._number(unique_id, f"smart_max_moisture_{channel_id}", f"Maximum moisture {channel_name}", base, device_info, 1, 99, 1, "%", "mdi:water-percent", f"{{{{ {channel_base}.config.smart_max_moisture }}}}")
