@@ -50,7 +50,7 @@ OPTIONS_PATH = DATA_DIR / "options.json"
 APP_DIR = Path(__file__).parent
 CARD_SOURCE_PATH = APP_DIR / "www" / "growcube-card.js"
 CARD_IMAGE_SOURCE_DIR = APP_DIR / "www" / "images"
-CARD_VERSION = "0.2.30"
+CARD_VERSION = "0.2.31"
 CARD_API_URL_PLACEHOLDER = "__GROWCUBE_ADDON_API_URL__"
 DEFAULT_INGRESS_PORT = 8099
 CLOUD_CATALOG_HOSTS = ("https://api.growcube.cc", "http://api.growcube.cc")
@@ -141,6 +141,7 @@ class DeviceRuntime:
         self.client: GrowCubeClient | None = None
         self.task: asyncio.Task | None = None
         self.pending_manual_amounts: dict[int, int] = {}
+        self.history_lock = asyncio.Lock()
 
     async def connect(self) -> None:
         async with self.manager.async_lock:
@@ -254,7 +255,15 @@ class GrowCubeManager:
         if state is None:
             raise KeyError("device not found")
 
-        if request_history:
+        with self.lock:
+            channel_state = state.channels[channel]
+            request_started = (
+                request_history
+                and not channel_state.history_loading
+                and not (channel_state.history_complete and channel_state.watering_events_complete)
+            )
+
+        if request_started:
             self.submit(self.request_history(state.id, channel))
 
         with self.lock:
@@ -263,7 +272,7 @@ class GrowCubeManager:
             return {
                 "device_id": mqtt_device_unique_id(self._state_to_dict(state)),
                 "channel": "abcd"[channel],
-                "history_loading": channel_state.history_loading or request_history,
+                "history_loading": channel_state.history_loading or request_started,
                 "history_complete": channel_state.history_complete,
                 "watering_events_complete": channel_state.watering_events_complete,
                 "history_points": len(channel_state.history),
@@ -324,8 +333,13 @@ class GrowCubeManager:
             "addon_api_url": device.get("addon_api_url") or "",
             "entities": dashboard_device_entities(device_id),
             "channels": {
-                channel: dashboard_channel_entities(device_id, channel)
-                for channel in "abcd"
+                channel: {
+                    **dashboard_channel_entities(device_id, channel),
+                    "plant_name": state.channels[index].config.plant_name,
+                    "photo_url": state.channels[index].config.photo_url,
+                    "configured": state.channels[index].plant_configured and state.channels[index].config.configured,
+                }
+                for index, channel in enumerate("abcd")
             },
         }
 
@@ -384,13 +398,26 @@ class GrowCubeManager:
         if runtime is None or runtime.client is None or not runtime.client.connected:
             raise RuntimeError("device is not connected")
         channel = validate_channel(channel)
-        async with self.async_lock:
-            state = self.devices[device_id]
-            state.channels[channel].history_loading = True
-            state.channels[channel].history_complete = False
-            state.channels[channel].watering_events_complete = False
-            self.touch_locked(state)
-        await runtime.client.request_history(channel)
+        async with runtime.history_lock:
+            async with self.async_lock:
+                state = self.devices[device_id]
+                state.channels[channel].history_loading = True
+                state.channels[channel].history_complete = False
+                state.channels[channel].watering_events_complete = False
+                self.touch_locked(state)
+            await runtime.client.request_history(channel)
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                async with self.async_lock:
+                    channel_state = self.devices[device_id].channels[channel]
+                    if not channel_state.history_loading:
+                        return
+                await asyncio.sleep(0.25)
+            async with self.async_lock:
+                state = self.devices[device_id]
+                state.channels[channel].history_loading = False
+                self.touch_locked(state)
+            LOGGER.warning("History request timed out device=%s channel=%s", self.devices[device_id].host, CHANNEL_NAMES[channel])
 
     async def set_tank_level(self, device_id: str, capacity_ml: int, remaining_ml: int) -> None:
         runtime = self.runtimes.get(device_id)
@@ -766,6 +793,7 @@ class GrowCubeManager:
                                 {
                                     "timestamp": timestamp,
                                     "amount_ml": amount,
+                                    "source": "manual",
                                 }
                             )
                             channel.watering_events = sorted(
@@ -798,7 +826,8 @@ class GrowCubeManager:
                 timestamp = report.timestamp.replace(tzinfo=timezone.utc).isoformat()
                 channel.last_watering = timestamp
                 if all(abs_iso_seconds(item.get("timestamp"), timestamp) > 30 for item in channel.watering_events):
-                    channel.watering_events.append({"timestamp": timestamp, "amount_ml": None})
+                    source = "timed" if channel.config.mode == "Repeating" else "smart" if channel.config.mode == "Smart" else "last"
+                    channel.watering_events.append({"timestamp": timestamp, "amount_ml": None, "source": source})
                     channel.watering_events = sorted(
                         channel.watering_events,
                         key=lambda item: item["timestamp"],

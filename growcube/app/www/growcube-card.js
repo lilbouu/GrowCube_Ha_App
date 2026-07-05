@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.30-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.31-addon-compat";
 const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
@@ -873,13 +873,14 @@ class GrowcubeCard extends HTMLElement {
     const wateringEvents = this._mergeHistoryItems(entityAttributes.watering_events, apiAttributes.watering_events, (item) => (
       typeof item === "string" ? item : item?.timestamp
     ));
+    const apiComplete = Boolean(apiAttributes.history_complete && apiAttributes.watering_events_complete);
     return {
       ...entityState,
       state: String(Math.max(Number(entityState.state) || 0, Number(apiState.state) || 0, history.length)),
       attributes: {
         ...entityAttributes,
         ...apiAttributes,
-        history_loading: Boolean(entityAttributes.history_loading || apiAttributes.history_loading),
+        history_loading: apiComplete ? false : Boolean(entityAttributes.history_loading || apiAttributes.history_loading),
         history_complete: Boolean(entityAttributes.history_complete || apiAttributes.history_complete),
         watering_events_complete: Boolean(
           entityAttributes.watering_events_complete || apiAttributes.watering_events_complete,
@@ -1072,7 +1073,8 @@ class GrowcubeCard extends HTMLElement {
   }
 
   _plantName() {
-    return this._entityDisplay(this._entities().name, this._config.name || `Plant ${this._channelLabel()}`);
+    const channelMeta = this._deviceRecord()?.channels?.[this._channelKey()] || {};
+    return channelMeta.plant_name || this._entityDisplay(this._entities().name, this._config.name || `Plant ${this._channelLabel()}`);
   }
 
   _modeOptions() {
@@ -1526,6 +1528,8 @@ class GrowcubeCard extends HTMLElement {
       if (apiResult) {
         console.info("[GrowCube] add plant via add-on API succeeded", { channel, mode });
         this._plantWizardOpen = false;
+        this._dashboardDevicesLoadedAt = 0;
+        this._loadDashboardDevicesIfNeeded(true);
         this._showToast("Plant added");
         this._navigateToChannel(channel);
         this._render();
@@ -1568,6 +1572,8 @@ class GrowcubeCard extends HTMLElement {
         await this._press(entities.save);
       }
       this._plantWizardOpen = false;
+      this._dashboardDevicesLoadedAt = 0;
+      this._loadDashboardDevicesIfNeeded(true);
       this._showToast("Plant added");
     } catch (error) {
       this._showError(error?.message || "Could not add plant");
@@ -3451,12 +3457,13 @@ class GrowcubeCard extends HTMLElement {
         channel,
         deviceId: device.device_id,
         deviceName: device.name || device.device_id,
+        metadata: device.channels?.[channel] || {},
         entities: {
           ...(device.entities || {}),
           ...(device.channels?.[channel] || {}),
         },
       }))
-      .filter((item) => this._isPlantConfigured(item.entities, false));
+      .filter((item) => item.metadata?.configured || this._isPlantConfigured(item.entities, false));
   }
 
   _dashboardTemplate({ entities }) {
@@ -3552,9 +3559,9 @@ class GrowcubeCard extends HTMLElement {
     `;
   }
 
-  _plantRowTemplate({ channel, entities, deviceId = "" }) {
-    const photoUrl = this._plantImageUrl(this._entityState(entities.photo_url, ""));
-    const name = this._entityDisplay(entities.name, this._channelName(channel));
+  _plantRowTemplate({ channel, entities, deviceId = "", metadata = {} }) {
+    const photoUrl = this._plantImageUrl(metadata.photo_url || this._entityState(entities.photo_url, ""));
+    const name = metadata.plant_name || this._entityDisplay(entities.name, this._channelName(channel));
     const moisture = this._entityDisplay(entities.moisture, "Unknown");
     const mode = this._normalizeMode(this._entityState(entities.mode, "Disabled"));
     return `
@@ -3911,7 +3918,8 @@ class GrowcubeCard extends HTMLElement {
   _aboutDialogTemplate(data, profile) {
     const aboutText = profile.description || (this._aboutProfileLoading ? "Loading plant information..." : "No plant information is available for this profile yet.");
     const category = profile.category || "Plant profile";
-    const photoUrl = this._plantImageUrl(this._entityState(data.entities.photo_url, ""));
+    const channelMeta = this._deviceRecord()?.channels?.[this._channelKey()] || {};
+    const photoUrl = this._plantImageUrl(channelMeta.photo_url || this._entityState(data.entities.photo_url, ""));
     const statCards = [
       this._profileStatTemplate("Soil moisture", this._rangeText(data.smartMinMoisture, data.smartMaxMoisture, "%")),
       this._hasRange(profile.tempMin, profile.tempMax)
@@ -4286,11 +4294,12 @@ class GrowcubeCard extends HTMLElement {
         if (!Number.isFinite(timestamp)) {
           return;
         }
+        const source = typeof event === "string" ? "" : String(event?.source || "");
         pushItem({
           ts: timestamp,
           kind: "watering",
-          title: "Automatic watering",
-          detail: channelLabel,
+          title: this._wateringActivityTitle(source),
+          detail: this._wateringActivityDetail(channelLabel, event),
         });
       });
 
@@ -4311,6 +4320,25 @@ class GrowcubeCard extends HTMLElement {
     return items
       .sort((a, b) => b.ts - a.ts)
       .slice(0, 6);
+  }
+
+  _wateringActivityTitle(source) {
+    if (source === "manual") {
+      return "Manual watering";
+    }
+    if (source === "timed") {
+      return "Timed watering";
+    }
+    if (source === "smart") {
+      return "Smart watering";
+    }
+    return "Last watering";
+  }
+
+  _wateringActivityDetail(channelLabel, event) {
+    const amount = typeof event === "string" ? undefined : event?.amount_ml;
+    const amountText = Number(amount) > 0 ? ` · ${Number(amount)} mL` : "";
+    return `${channelLabel}${amountText}`;
   }
 
   _activityFeedTemplate() {
