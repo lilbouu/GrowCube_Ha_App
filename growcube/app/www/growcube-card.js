@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.31-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.32-addon-compat";
 const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
@@ -116,6 +116,26 @@ class GrowcubeCard extends HTMLElement {
       return this._dashboardDevices[0];
     }
     return this._dashboardDevices.find((item) => item.device_id === deviceId) || this._dashboardDevices[0];
+  }
+
+  _applyOptimisticChannelMetadata(channel, values = {}) {
+    let record = this._deviceRecord();
+    if (!record) {
+      record = {
+        device_id: this._selectedDeviceId() || this._deviceIdHint() || "growcube",
+        name: this._selectedDeviceId() || this._deviceIdHint() || "GrowCube",
+        entities: {},
+        channels: {},
+      };
+      this._dashboardDevices = [record];
+    }
+    record.channels = record.channels || {};
+    record.channels[channel] = {
+      ...(record.channels[channel] || {}),
+      plant_name: values.plant_name || record.channels[channel]?.plant_name || "",
+      photo_url: this._plantImageUrl(values.photo_url || record.channels[channel]?.photo_url || ""),
+      configured: values.configured ?? record.channels[channel]?.configured ?? true,
+    };
   }
 
   _deviceRecords() {
@@ -1495,10 +1515,11 @@ class GrowcubeCard extends HTMLElement {
     const entities = this._entities(channel);
     const mode = this._normalizeMode(this._plantWizardMode || "Disabled");
     const profile = this._plantWizardSelected || {};
+    const photoUrl = this._plantImageUrl(this._plantWizardPhotoUrl || this._catalogImageUrl(profile));
     const values = {
       configured: true,
       plant_name: this._plantWizardName.trim(),
-      photo_url: this._plantWizardPhotoUrl.trim(),
+      photo_url: photoUrl,
       type_category: profile.category || "",
       type_description: profile.description || "",
       temp_min: Number(profile.temp_min) || 0,
@@ -1528,6 +1549,7 @@ class GrowcubeCard extends HTMLElement {
       if (apiResult) {
         console.info("[GrowCube] add plant via add-on API succeeded", { channel, mode });
         this._plantWizardOpen = false;
+        this._applyOptimisticChannelMetadata(channel, values);
         this._dashboardDevicesLoadedAt = 0;
         this._loadDashboardDevicesIfNeeded(true);
         this._showToast("Plant added");
@@ -1538,8 +1560,8 @@ class GrowcubeCard extends HTMLElement {
       if (entities.name && this._plantWizardName.trim()) {
         await this._setText(entities.name, this._plantWizardName.trim());
       }
-      if (entities.photo_url && this._plantWizardPhotoUrl.trim()) {
-        await this._setText(entities.photo_url, this._plantWizardPhotoUrl.trim());
+      if (entities.photo_url && photoUrl) {
+        await this._setText(entities.photo_url, photoUrl);
       }
       if (entities.mode) {
         await this._setSelect(entities.mode, mode);
@@ -1572,9 +1594,12 @@ class GrowcubeCard extends HTMLElement {
         await this._press(entities.save);
       }
       this._plantWizardOpen = false;
+      this._applyOptimisticChannelMetadata(channel, values);
       this._dashboardDevicesLoadedAt = 0;
       this._loadDashboardDevicesIfNeeded(true);
       this._showToast("Plant added");
+      this._navigateToChannel(channel);
+      this._render();
     } catch (error) {
       this._showError(error?.message || "Could not add plant");
     }
@@ -1592,11 +1617,11 @@ class GrowcubeCard extends HTMLElement {
     this._plantWizardError = "";
     this._render();
     try {
-      this._plantWizardResults = await this._catalogSearch(this._plantWizardSearch.trim());
+      this._plantWizardResults = this._normalizeCatalogPlants(await this._catalogSearch(this._plantWizardSearch.trim()));
       this._plantWizardResultPage = 0;
       this._plantWizardError = this._plantWizardResults.length ? "" : "No plants found";
     } catch (error) {
-      this._plantWizardResults = this._customPlantCatalogResult(this._plantWizardSearch.trim());
+      this._plantWizardResults = this._normalizeCatalogPlants(this._customPlantCatalogResult(this._plantWizardSearch.trim()));
       this._plantWizardResultPage = 0;
       this._plantWizardError = this._plantWizardResults.length
         ? "Online catalog unavailable; using custom profile"
@@ -1613,7 +1638,7 @@ class GrowcubeCard extends HTMLElement {
       const plants = Array.isArray(result?.plants) ? result.plants : [];
       console.info("[GrowCube] add-on plant search result", { query, count: plants.length });
       if (plants.length) {
-        return plants;
+        return this._normalizeCatalogPlants(plants);
       }
     } catch (error) {
       console.warn("[GrowCube] add-on plant search failed", { query, error: error?.message || String(error) });
@@ -1628,7 +1653,7 @@ class GrowcubeCard extends HTMLElement {
         const plants = Array.isArray(result?.plants) ? result.plants : [];
         console.info("[GrowCube] Home Assistant plant search result", { query, count: plants.length });
         if (plants.length) {
-          return plants;
+          return this._normalizeCatalogPlants(plants);
         }
       } catch (error) {
         console.warn("[GrowCube] Home Assistant plant search failed", { query, error: error?.message || String(error) });
@@ -1639,14 +1664,14 @@ class GrowcubeCard extends HTMLElement {
       const result = await this._fetchGrowCubeCatalog(query);
       console.info("[GrowCube] direct GrowCube catalog result", { query, count: result.length });
       if (result.length) {
-        return result;
+        return this._normalizeCatalogPlants(result);
       }
     } catch (error) {
       console.warn("[GrowCube] direct GrowCube catalog failed", { query, error: error?.message || String(error) });
     }
 
     console.warn("[GrowCube] using custom plant fallback", { query });
-    return this._customPlantCatalogResult(query);
+    return this._normalizeCatalogPlants(this._customPlantCatalogResult(query));
   }
 
   async _fetchGrowCubeCatalog(query) {
@@ -1702,7 +1727,7 @@ class GrowcubeCard extends HTMLElement {
   }
 
   _selectPlantCatalogItem(index) {
-    const item = this._plantWizardResults[Number(index)];
+    const item = this._normalizeCatalogPlant(this._plantWizardResults[Number(index)]);
     if (!item) {
       return;
     }
@@ -1805,6 +1830,37 @@ class GrowcubeCard extends HTMLElement {
 
   _plantImageUrl(value) {
     return this._normalizePlantImageUrl(value);
+  }
+
+  _catalogImageUrl(item = {}) {
+    return this._plantImageUrl(
+      item.image_url
+      || item.photo_url
+      || item.picture_url
+      || item.thumbnail_url
+      || item.image
+      || item.picture
+      || item.thumbnail
+      || "",
+    );
+  }
+
+  _normalizeCatalogPlant(item) {
+    if (!item || typeof item !== "object") {
+      return null;
+    }
+    const imageUrl = this._catalogImageUrl(item);
+    return {
+      ...item,
+      display_name: item.display_name || item.name || "",
+      image_url: imageUrl,
+    };
+  }
+
+  _normalizeCatalogPlants(plants) {
+    return Array.isArray(plants)
+      ? plants.map((item) => this._normalizeCatalogPlant(item)).filter(Boolean)
+      : [];
   }
 
   _profileHasDetails(profile) {
@@ -3919,7 +3975,11 @@ class GrowcubeCard extends HTMLElement {
     const aboutText = profile.description || (this._aboutProfileLoading ? "Loading plant information..." : "No plant information is available for this profile yet.");
     const category = profile.category || "Plant profile";
     const channelMeta = this._deviceRecord()?.channels?.[this._channelKey()] || {};
-    const photoUrl = this._plantImageUrl(channelMeta.photo_url || this._entityState(data.entities.photo_url, ""));
+    const photoUrl = this._plantImageUrl(
+      channelMeta.photo_url
+      || this._entityState(data.entities.photo_url, "")
+      || this._catalogImageUrl(this._plantWizardSelected || {}),
+    );
     const statCards = [
       this._profileStatTemplate("Soil moisture", this._rangeText(data.smartMinMoisture, data.smartMaxMoisture, "%")),
       this._hasRange(profile.tempMin, profile.tempMax)
@@ -4038,7 +4098,10 @@ class GrowcubeCard extends HTMLElement {
         </div>
       `;
     }
-    if (!visibleHistoryPoints.length) {
+    const graphSourcePoints = visibleHistoryPoints.length
+      ? visibleHistoryPoints
+      : this._fallbackMoistureHistoryPoints(entities, windowStart, windowEnd);
+    if (!graphSourcePoints.length) {
       return `
         <div class="chart-panel">
           ${this._detailChartHeaderTemplate(historyHours, entities, moisture, false)}
@@ -4050,7 +4113,7 @@ class GrowcubeCard extends HTMLElement {
       `;
     }
     const points = this._extendFreshHistoryToNow(
-      this._smoothGraphPoints(visibleHistoryPoints),
+      this._smoothGraphPoints(graphSourcePoints),
       windowEnd,
     );
     const coords = this._graphCoordinates(points, width, height, padding, leftPadding, windowStart, windowEnd);
@@ -4162,6 +4225,17 @@ class GrowcubeCard extends HTMLElement {
       }))
       .filter((point) => Number.isFinite(point.t) && Number.isFinite(point.v) && point.v > 0 && point.v <= 100)
       .sort((a, b) => a.t - b.t);
+  }
+
+  _fallbackMoistureHistoryPoints(entities, windowStart, windowEnd) {
+    const moisture = Number(this._entityState(entities.moisture, NaN));
+    if (!Number.isFinite(moisture) || moisture < 0 || moisture > 100) {
+      return [];
+    }
+    return [
+      { t: windowStart, v: moisture },
+      { t: windowEnd, v: moisture },
+    ];
   }
 
   _historyEmptyText(historyState, hours) {
@@ -4733,7 +4807,7 @@ class GrowcubeCard extends HTMLElement {
     const item = this._plantWizardSelected || {};
     const name = item.display_name || item.name || this._plantWizardName || "Unknown plant";
     const about = item.description || "No catalog description is available for this plant.";
-    const imageUrl = this._plantImageUrl(item.image_url);
+    const imageUrl = this._catalogImageUrl(item);
     return `
       <div class="profile-panel">
         <div class="profile-hero">
@@ -4847,7 +4921,7 @@ class GrowcubeCard extends HTMLElement {
 
   _catalogResultTemplate(item, index) {
     const name = item.display_name || item.name || "Unknown plant";
-    const imageUrl = this._plantImageUrl(item.image_url);
+    const imageUrl = this._catalogImageUrl(item);
     return `
       <div class="plant-row" data-action="select-catalog-plant" data-index="${index}" role="button" tabindex="0">
         <div class="plant-photo">
