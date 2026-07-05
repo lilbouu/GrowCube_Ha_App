@@ -50,7 +50,7 @@ OPTIONS_PATH = DATA_DIR / "options.json"
 APP_DIR = Path(__file__).parent
 CARD_SOURCE_PATH = APP_DIR / "www" / "growcube-card.js"
 CARD_IMAGE_SOURCE_DIR = APP_DIR / "www" / "images"
-CARD_VERSION = "0.2.23"
+CARD_VERSION = "0.2.25"
 CARD_API_URL_PLACEHOLDER = "__GROWCUBE_ADDON_API_URL__"
 DEFAULT_INGRESS_PORT = 8099
 CLOUD_CATALOG_HOSTS = ("https://api.growcube.cc", "http://api.growcube.cc")
@@ -375,6 +375,31 @@ class GrowCubeManager:
             self.touch_locked(state)
         await runtime.client.request_history(channel)
 
+    async def set_tank_level(self, device_id: str, capacity_ml: int, remaining_ml: int) -> None:
+        runtime = self.runtimes.get(device_id)
+        if runtime is None or runtime.client is None or not runtime.client.connected:
+            raise RuntimeError("device is not connected")
+        capacity_ml = max(1, int(capacity_ml))
+        remaining_ml = min(capacity_ml, max(0, int(remaining_ml)))
+        LOGGER.info(
+            "Set tank level device=%s capacity_ml=%s remaining_ml=%s",
+            self.devices[device_id].host,
+            capacity_ml,
+            remaining_ml,
+        )
+        await runtime.client.send(Command(52, f"{capacity_ml}@{remaining_ml}"))
+        await runtime.client.send(Command(54, ""))
+
+    async def reset_plant(self, device_id: str, channel: int) -> None:
+        runtime = self.runtimes.get(device_id)
+        if runtime is None or runtime.client is None or not runtime.client.connected:
+            raise RuntimeError("device is not connected")
+        channel = validate_channel(channel)
+        LOGGER.info("Reset plant device=%s channel=%s", self.devices[device_id].host, CHANNEL_NAMES[channel])
+        await runtime.client.send(Command(47, f"{channel}@0"))
+        await runtime.client.send(Command(45, f"{channel}"))
+        await runtime.client.send(Command(46, f"{channel}"))
+
     async def apply_watering_config(self, device_id: str, channel: int) -> None:
         runtime = self.runtimes.get(device_id)
         if runtime is None or runtime.client is None or not runtime.client.connected:
@@ -544,14 +569,19 @@ class GrowCubeManager:
     async def handle_entity_command(self, state: DeviceState, key: str, payload: str) -> None:
         channel = channel_from_key(key)
         changed = ""
+        tank_update: tuple[int, int] | None = None
+        reset_channel: int | None = None
         async with self.async_lock:
             if key == "tank_capacity":
                 state.tank_capacity_ml = clamp_int(payload, 500, 50000, state.tank_capacity_ml)
                 state.tank_remaining_ml = min(state.tank_remaining_ml, state.tank_capacity_ml)
+                state.tank_used_ml = min(state.tank_used_ml, state.tank_capacity_ml)
+                tank_update = (state.tank_capacity_ml, state.tank_remaining_ml)
                 changed = f"tank_capacity={state.tank_capacity_ml}"
             elif key == "mark_tank_full":
                 state.tank_remaining_ml = state.tank_capacity_ml
                 state.tank_used_ml = 0
+                tank_update = (state.tank_capacity_ml, state.tank_remaining_ml)
                 changed = "tank marked full"
             elif channel is not None:
                 config = state.channels[channel].config
@@ -599,12 +629,8 @@ class GrowCubeManager:
                     config.configured = True
                     changed = "plant configured"
                 elif key.startswith("reset_plant_"):
-                    state.channels[channel].plant_configured = False
-                    config.configured = False
-                    config.plant_name = ""
-                    config.photo_url = ""
-                    config.mode = "Disabled"
-                    changed = "plant reset"
+                    reset_channel = channel
+                    changed = "plant reset requested"
                 else:
                     LOGGER.warning("Ignoring unsupported MQTT entity command %s", key)
                     return
@@ -632,6 +658,13 @@ class GrowCubeManager:
             mode = state.channels[channel].config.mode
             if mode in {"Smart", "Repeating"}:
                 await self.apply_watering_config(state.id, channel)
+        elif channel is not None and reset_channel is not None:
+            await self.reset_plant(state.id, reset_channel)
+            async with self.async_lock:
+                state.channels[reset_channel] = ChannelState()
+                self.touch_locked(state)
+        elif tank_update is not None:
+            await self.set_tank_level(state.id, tank_update[0], tank_update[1])
 
     def find_device(self, device_key: str) -> DeviceState | None:
         with self.lock:

@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.23-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.25-addon-compat";
 const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
@@ -177,7 +177,7 @@ class GrowcubeCard extends HTMLElement {
       this._dashboardDevicesLoadedAt = Date.now();
     } finally {
       this._dashboardDevicesLoading = false;
-      this._render();
+      this._renderAfterBackgroundUpdate();
     }
   }
 
@@ -691,7 +691,7 @@ class GrowcubeCard extends HTMLElement {
       this._historyError = "History unavailable";
     } finally {
       this._historyLoading = false;
-      this._render();
+      this._renderAfterBackgroundUpdate();
     }
   }
 
@@ -955,7 +955,7 @@ class GrowcubeCard extends HTMLElement {
           this._loadCubeHistoryApiIfNeeded(true);
         }, 3000);
       }
-      this._render();
+      this._renderAfterBackgroundUpdate();
     }
   }
 
@@ -1197,13 +1197,29 @@ class GrowcubeCard extends HTMLElement {
     }
     this._toastTimer = setTimeout(() => {
       this._toast = "";
-      this._render();
+      this._renderAfterBackgroundUpdate();
     }, 2600);
     this._render();
   }
 
   _showError(message) {
     this._showToast(message || "Action failed");
+  }
+
+  _hasActiveInputDialog() {
+    return Boolean(
+      this._editDialog
+      || this._plantWizardOpen
+      || this._modeWizardOpen
+      || this._wateringOpen
+      || this._reservoirOpen
+    );
+  }
+
+  _renderAfterBackgroundUpdate() {
+    if (!this._hasActiveInputDialog()) {
+      this._render();
+    }
   }
 
   _openWateringDialog() {
@@ -1359,6 +1375,9 @@ class GrowcubeCard extends HTMLElement {
   }
 
   _setPlantWizardStep(step) {
+    if (Number(step) >= 2 && !this._availablePlantWizardChannels().includes(this._plantWizardChannel)) {
+      this._plantWizardChannel = this._firstAvailableChannel();
+    }
     this._plantWizardStep = this._clamp(Number(step), 0, 5);
     this._render();
   }
@@ -1371,7 +1390,7 @@ class GrowcubeCard extends HTMLElement {
       return Boolean(this._plantWizardSelected);
     }
     if (this._plantWizardStep === 2) {
-      return Boolean(this._plantWizardChannel);
+      return this._availablePlantWizardChannels().includes(this._plantWizardChannel);
     }
     if (this._plantWizardStep === 3) {
       return this._plantWizardMode === "Smart" || this._plantWizardMode === "Repeating";
@@ -1437,7 +1456,12 @@ class GrowcubeCard extends HTMLElement {
   }
 
   async _confirmAddPlant() {
-    const channel = this._plantWizardChannel || this._firstAvailableChannel();
+    const availableChannels = this._availablePlantWizardChannels();
+    const channel = availableChannels.includes(this._plantWizardChannel) ? this._plantWizardChannel : availableChannels[0];
+    if (!channel) {
+      this._showError("No free channels available");
+      return;
+    }
     const entities = this._entities(channel);
     const mode = this._normalizeMode(this._plantWizardMode || "Disabled");
     const profile = this._plantWizardSelected || {};
@@ -1784,7 +1808,7 @@ class GrowcubeCard extends HTMLElement {
       // Keep About usable even if catalog lookup fails.
     } finally {
       this._aboutProfileLoading = false;
-      this._render();
+      this._renderAfterBackgroundUpdate();
     }
   }
 
@@ -3434,7 +3458,21 @@ class GrowcubeCard extends HTMLElement {
   }
 
   _firstAvailableChannel() {
-    return this._channels().find((channel) => !this._isPlantConfigured(this._entities(channel), false)) || "a";
+    return this._availablePlantWizardChannels()[0] || "";
+  }
+
+  _availablePlantWizardChannels() {
+    const device = this._deviceRecord();
+    return this._channels().filter((channel) => {
+      const mappedChannelEntities = device?.channels?.[channel] || {};
+      if (Object.keys(mappedChannelEntities).length) {
+        return !this._isPlantConfigured({
+          ...(device?.entities || {}),
+          ...mappedChannelEntities,
+        }, false);
+      }
+      return !this._isPlantConfigured(this._entities(channel), false);
+    });
   }
 
   _plantsTemplate() {
@@ -4638,7 +4676,10 @@ class GrowcubeCard extends HTMLElement {
   }
 
   _plantWizardChannelStep() {
-    const availableChannels = this._channels();
+    const availableChannels = this._availablePlantWizardChannels();
+    if (!availableChannels.length) {
+      return '<div class="label">All channels already have plants.</div>';
+    }
     return `
       <div class="channel-grid">
         ${availableChannels.map((channel) => `
