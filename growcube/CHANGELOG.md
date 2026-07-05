@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.34
+
+- Render saved plant photos in the summary and detail card headers instead of falling back to the flower icon after a plant is added.
+- Reuse the saved plant photo resolver for the active channel so dashboard metadata and Home Assistant text entity values both work after save.
+
 ## 0.2.33
 
 - Resolve saved plant photo URLs from dashboard metadata, Home Assistant text entities, and markdown-style copied URLs before rendering images.

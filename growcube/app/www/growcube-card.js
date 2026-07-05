@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.33-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.34-addon-compat";
 const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
@@ -1097,6 +1097,11 @@ class GrowcubeCard extends HTMLElement {
   _plantName() {
     const channelMeta = this._deviceRecord()?.channels?.[this._channelKey()] || {};
     return channelMeta.plant_name || this._entityDisplay(this._entities().name, this._config.name || `Plant ${this._channelLabel()}`);
+  }
+
+  _currentPlantPhotoUrl(channel = this._channelKey()) {
+    const channelMeta = this._deviceRecord()?.channels?.[channel] || {};
+    return this._resolvedPlantPhotoUrl(channelMeta.photo_url, this._entities(channel).photo_url);
   }
 
   _modeOptions() {
@@ -2384,10 +2389,17 @@ class GrowcubeCard extends HTMLElement {
           width: 42px;
           height: 42px;
           border-radius: 50%;
+          overflow: hidden;
           display: grid;
           place-items: center;
           color: var(--primary-color);
           background: color-mix(in srgb, var(--primary-color) 16%, transparent);
+        }
+
+        .plant-icon img {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
         }
 
         .title {
@@ -2639,10 +2651,16 @@ class GrowcubeCard extends HTMLElement {
 
         .plant-titlebar {
           display: grid;
-          grid-template-columns: minmax(0, 1fr) auto;
+          grid-template-columns: auto minmax(0, 1fr) auto;
           gap: 14px;
           align-items: center;
           padding-top: 6px;
+        }
+
+        .plant-titlebar .plant-photo {
+          width: 72px;
+          height: 72px;
+          cursor: default;
         }
 
         .plant-titlebar .title {
@@ -3880,10 +3898,11 @@ class GrowcubeCard extends HTMLElement {
     const blocked = this._wateringBlocked(problems);
     const automaticLabel = mode === "Smart" ? "Moisture range" : "Next watering";
     const automaticValue = mode === "Smart" ? smartRange : next;
+    const photoUrl = this._currentPlantPhotoUrl();
     return `
       <div class="card summary" data-action="navigate">
         <div class="header">
-          <div class="plant-icon"><ha-icon icon="mdi:flower"></ha-icon></div>
+          <div class="plant-icon">${photoUrl ? `<img src="${this._escape(photoUrl)}" alt="">` : '<ha-icon icon="mdi:flower"></ha-icon>'}</div>
           <div>
             <div class="title">${this._escape(this._plantName())}</div>
             <div class="subtitle">${this._escape(this._config.channel || this._channelLabel())}</div>
@@ -3928,11 +3947,15 @@ class GrowcubeCard extends HTMLElement {
     const secondaryValue = data.mode === "Smart"
       ? (data.smartDaytimeWatering ? "On" : "Off")
       : `${data.scheduleDuration} mL / ${Math.max(1, Math.round(data.interval / 24))}d`;
+    const photoUrl = this._currentPlantPhotoUrl();
     return `
       <div class="card detail detail-flat">
         <div class="plant-dashboard">
           <div class="plant-main plant-section">
             <div class="plant-titlebar">
+              <div class="plant-photo">
+                ${photoUrl ? `<img src="${this._escape(photoUrl)}" alt="">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
+              </div>
               <div>
                 <div class="title" data-action="edit-plant-name" role="button" tabindex="0">${this._escape(this._plantName())}</div>
                 <div class="channel-pill"><ha-icon icon="mdi:checkbox-blank-circle-outline"></ha-icon><span>${this._escape(this._config.channel || this._channelLabel())}</span></div>
