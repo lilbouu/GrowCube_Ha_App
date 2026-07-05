@@ -50,7 +50,7 @@ OPTIONS_PATH = DATA_DIR / "options.json"
 APP_DIR = Path(__file__).parent
 CARD_SOURCE_PATH = APP_DIR / "www" / "growcube-card.js"
 CARD_IMAGE_SOURCE_DIR = APP_DIR / "www" / "images"
-CARD_VERSION = "0.2.25"
+CARD_VERSION = "0.2.26"
 CARD_API_URL_PLACEHOLDER = "__GROWCUBE_ADDON_API_URL__"
 DEFAULT_INGRESS_PORT = 8099
 CLOUD_CATALOG_HOSTS = ("https://api.growcube.cc", "http://api.growcube.cc")
@@ -186,19 +186,35 @@ class GrowCubeManager:
         stored = self._read_json(STATE_PATH, {})
         options = self._read_json(OPTIONS_PATH, {})
 
-        devices: list[dict[str, Any]] = []
+        stored_devices: list[dict[str, Any]] = []
         if isinstance(stored.get("devices"), list):
-            devices.extend(stored["devices"])
+            stored_devices.extend(item for item in stored["devices"] if isinstance(item, dict))
+        option_devices: list[dict[str, Any]] = []
         if isinstance(options.get("devices"), list):
             for item in options["devices"]:
                 if isinstance(item, dict):
-                    devices.append(item)
+                    option_devices.append(item)
 
         with self.lock:
-            for item in devices:
+            self.devices = {}
+            devices_by_host: dict[str, DeviceState] = {}
+            for item in stored_devices:
                 state = self._state_from_dict(item)
                 if state.host:
-                    self.devices[state.id] = state
+                    devices_by_host[state.host.strip().lower()] = state
+            for item in option_devices:
+                option_state = self._state_from_dict(item)
+                if not option_state.host:
+                    continue
+                host_key = option_state.host.strip().lower()
+                existing = devices_by_host.get(host_key)
+                if existing is None:
+                    devices_by_host[host_key] = option_state
+                    continue
+                existing.name = option_state.name or existing.name
+                existing.port = option_state.port or existing.port
+
+            self.devices = {state.id: state for state in devices_by_host.values()}
             LOGGER.info("Loaded %s GrowCube device(s) from add-on configuration", len(self.devices))
 
     def start_loop(self) -> None:
@@ -667,15 +683,21 @@ class GrowCubeManager:
             await self.set_tank_level(state.id, tank_update[0], tank_update[1])
 
     def find_device(self, device_key: str) -> DeviceState | None:
+        lookup = str(device_key or "").strip()
+        safe_lookup = mqtt_safe_id(lookup)
         with self.lock:
             for state in self.devices.values():
-                if device_key in {
+                aliases = {
+                    state.id,
+                    state.device_id or "",
+                    state.host,
                     mqtt_safe_id(state.id),
                     mqtt_safe_id(state.device_id or ""),
                     mqtt_safe_id(state.host),
                     f"growcube_{mqtt_safe_id(state.host)}",
                     mqtt_device_unique_id(self._state_to_dict(state)),
-                }:
+                }
+                if lookup in aliases or safe_lookup in aliases:
                     return state
         return None
 

@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.25-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.26-addon-compat";
 const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
@@ -820,6 +820,11 @@ class GrowcubeCard extends HTMLElement {
     return deviceMatch ? deviceMatch[1] : "";
   }
 
+  _apiDeviceIdHint() {
+    const record = this._deviceRecord();
+    return String(record?.host || record?.device_id || this._deviceIdHint() || "").trim();
+  }
+
   _apiHistoryState(channel = this._channelKey()) {
     const data = this._cubeHistory[channel];
     if (!data) {
@@ -920,7 +925,7 @@ class GrowcubeCard extends HTMLElement {
         channel,
         request: shouldRequest ? "1" : "0",
       });
-      const deviceId = this._deviceIdHint();
+      const deviceId = this._apiDeviceIdHint();
       if (deviceId) {
         params.set("device_id", deviceId);
       }
@@ -976,7 +981,7 @@ class GrowcubeCard extends HTMLElement {
 
   async _applyWateringApi(channel = this._channelKey()) {
     const params = new URLSearchParams({ channel });
-    const deviceId = this._deviceIdHint();
+    const deviceId = this._apiDeviceIdHint();
     if (deviceId) {
       params.set("device_id", deviceId);
     }
@@ -985,7 +990,7 @@ class GrowcubeCard extends HTMLElement {
 
   async _configureChannelApi(channel = this._channelKey(), values = {}, apply = true) {
     const params = new URLSearchParams({ channel, apply: apply ? "1" : "0" });
-    const deviceId = this._deviceIdHint();
+    const deviceId = this._apiDeviceIdHint();
     if (deviceId) {
       params.set("device_id", deviceId);
     }
@@ -1332,10 +1337,9 @@ class GrowcubeCard extends HTMLElement {
   async _disableModeWizard() {
     const entities = this._entities();
     try {
-      if (!entities.mode) {
-        throw new Error("Mode entity is unavailable");
+      if (entities.mode) {
+        await this._setSelect(entities.mode, "Disabled");
       }
-      await this._setSelect(entities.mode, "Disabled");
       await this._saveScheduleAfterEdit("Automatic watering disabled", { mode: "Disabled" });
       this._modeWizardOpen = false;
       this._render();
@@ -4810,16 +4814,27 @@ class GrowcubeCard extends HTMLElement {
 
   async _saveScheduleAfterEdit(message, values = {}) {
     const hasDirectValues = Object.keys(values).length > 0;
+    let apiError = null;
     if (hasDirectValues) {
-      const result = await this._configureChannelApi(this._channelKey(), values, true);
-      if (result) {
-        this._showToast(message);
-        return;
+      try {
+        const result = await this._configureChannelApi(this._channelKey(), values, true);
+        if (result) {
+          this._showToast(message);
+          return;
+        }
+      } catch (error) {
+        apiError = error;
+        console.warn("[GrowCube] add-on schedule update failed, trying entity fallback", {
+          channel: this._channelKey(),
+          error: error?.message || String(error),
+        });
       }
     }
     const save = this._entities().save;
     if (save) {
       await this._press(save);
+    } else if (hasDirectValues && apiError) {
+      throw apiError;
     } else {
       await this._applyWateringApi();
     }
@@ -5009,24 +5024,29 @@ class GrowcubeCard extends HTMLElement {
   async _confirmModeWizard() {
     const entities = this._entities();
     try {
-      if (!entities.mode) {
-        throw new Error("Mode entity is unavailable");
+      if (entities.mode) {
+        await this._setSelect(entities.mode, this._normalizeMode(this._modeWizardMode));
       }
-      await this._setSelect(entities.mode, this._normalizeMode(this._modeWizardMode));
       if (this._modeWizardMode === "Smart") {
-        if (!entities.smart_min_moisture || !entities.smart_max_moisture || !entities.smart_daytime_watering) {
-          throw new Error("Smart watering entities are unavailable");
+        if (entities.smart_min_moisture) {
+          await this._setNumber(entities.smart_min_moisture, this._modeWizardSmartMin);
         }
-        await this._setNumber(entities.smart_min_moisture, this._modeWizardSmartMin);
-        await this._setNumber(entities.smart_max_moisture, this._modeWizardSmartMax);
-        await this._setSwitch(entities.smart_daytime_watering, this._modeWizardDaytime);
+        if (entities.smart_max_moisture) {
+          await this._setNumber(entities.smart_max_moisture, this._modeWizardSmartMax);
+        }
+        if (entities.smart_daytime_watering) {
+          await this._setSwitch(entities.smart_daytime_watering, this._modeWizardDaytime);
+        }
       } else if (this._modeWizardMode === "Repeating") {
-        if (!entities.first_watering_time || !entities.duration || !entities.interval) {
-          throw new Error("Timed watering entities are unavailable");
+        if (entities.first_watering_time) {
+          await this._setTime(entities.first_watering_time, this._modeWizardStartTime());
         }
-        await this._setTime(entities.first_watering_time, this._modeWizardStartTime());
-        await this._setNumber(entities.duration, this._modeWizardAmount);
-        await this._setNumber(entities.interval, this._modeWizardIntervalDays * 24);
+        if (entities.duration) {
+          await this._setNumber(entities.duration, this._modeWizardAmount);
+        }
+        if (entities.interval) {
+          await this._setNumber(entities.interval, this._modeWizardIntervalDays * 24);
+        }
       }
       await this._saveScheduleAfterEdit("Watering settings updated", {
         mode: this._normalizeMode(this._modeWizardMode),
@@ -5049,9 +5069,6 @@ class GrowcubeCard extends HTMLElement {
     const entities = this._entities();
     try {
       if (kind === "mode") {
-        if (!entities.mode) {
-          throw new Error("Mode entity is unavailable");
-        }
         const modeValue = this._normalizeMode(this._editValue("mode"));
         const smartMin = this._clamp(Number(this._editValue("smart_min")), 1, 98);
         const smartMax = this._clamp(Number(this._editValue("smart_max")), smartMin + 1, 99);
@@ -5060,21 +5077,29 @@ class GrowcubeCard extends HTMLElement {
         const firstTime = `${String(firstHour).padStart(2, "0")}:${String(firstMinute).padStart(2, "0")}:00`;
         const amount = this._clamp(Number(this._editValue("schedule_amount")), 10, 500);
         const intervalHours = this._clamp(Number(this._editValue("schedule_days")), 1, 10) * 24;
-        await this._setSelect(entities.mode, modeValue);
+        if (entities.mode) {
+          await this._setSelect(entities.mode, modeValue);
+        }
         if (modeValue === "Smart") {
-          if (!entities.smart_min_moisture || !entities.smart_max_moisture || !entities.smart_daytime_watering) {
-            throw new Error("Smart watering entities are unavailable");
+          if (entities.smart_min_moisture) {
+            await this._setNumber(entities.smart_min_moisture, smartMin);
           }
-          await this._setNumber(entities.smart_min_moisture, smartMin);
-          await this._setNumber(entities.smart_max_moisture, smartMax);
-          await this._setSwitch(entities.smart_daytime_watering, smartDaytime);
+          if (entities.smart_max_moisture) {
+            await this._setNumber(entities.smart_max_moisture, smartMax);
+          }
+          if (entities.smart_daytime_watering) {
+            await this._setSwitch(entities.smart_daytime_watering, smartDaytime);
+          }
         } else if (modeValue === "Repeating") {
-          if (!entities.first_watering_time || !entities.duration || !entities.interval) {
-            throw new Error("Timed watering entities are unavailable");
+          if (entities.first_watering_time) {
+            await this._setTime(entities.first_watering_time, firstTime);
           }
-          await this._setTime(entities.first_watering_time, firstTime);
-          await this._setNumber(entities.duration, amount);
-          await this._setNumber(entities.interval, intervalHours);
+          if (entities.duration) {
+            await this._setNumber(entities.duration, amount);
+          }
+          if (entities.interval) {
+            await this._setNumber(entities.interval, intervalHours);
+          }
         }
         await this._saveScheduleAfterEdit("Watering settings updated", {
           mode: modeValue,
@@ -5102,44 +5127,44 @@ class GrowcubeCard extends HTMLElement {
         await this._setNumber(entities.manual_duration, this._clamp(Number(this._editValue("manual_amount")), 30, 150));
         this._showToast("Manual amount updated");
       } else if (kind === "smartRange") {
-        if (!entities.smart_min_moisture || !entities.smart_max_moisture) {
-          throw new Error("Moisture range entities are unavailable");
-        }
         const min = this._clamp(Number(this._editValue("smart_min")), 1, 98);
         const max = this._clamp(Number(this._editValue("smart_max")), min + 1, 99);
-        await this._setNumber(entities.smart_min_moisture, min);
-        await this._setNumber(entities.smart_max_moisture, max);
+        if (entities.smart_min_moisture) {
+          await this._setNumber(entities.smart_min_moisture, min);
+        }
+        if (entities.smart_max_moisture) {
+          await this._setNumber(entities.smart_max_moisture, max);
+        }
         await this._saveScheduleAfterEdit("Moisture range updated", {
           smart_min_moisture: min,
           smart_max_moisture: max,
         });
       } else if (kind === "daytime") {
-        if (!entities.smart_daytime_watering) {
-          throw new Error("Daytime watering entity is unavailable");
-        }
         const daytime = this._editValue("daytime") === "on";
-        await this._setSwitch(entities.smart_daytime_watering, daytime);
+        if (entities.smart_daytime_watering) {
+          await this._setSwitch(entities.smart_daytime_watering, daytime);
+        }
         await this._saveScheduleAfterEdit("Daytime watering updated", {
           smart_daytime_watering: daytime,
         });
       } else if (kind === "firstWatering") {
-        if (!entities.first_watering_time) {
-          throw new Error("First watering entity is unavailable");
-        }
         const [hour, minute] = this._splitTime(this._editValue("first_time"));
         const firstTime = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00`;
-        await this._setTime(entities.first_watering_time, firstTime);
+        if (entities.first_watering_time) {
+          await this._setTime(entities.first_watering_time, firstTime);
+        }
         await this._saveScheduleAfterEdit("First watering updated", {
           first_watering_time: firstTime,
         });
       } else if (kind === "schedule") {
-        if (!entities.duration || !entities.interval) {
-          throw new Error("Schedule entities are unavailable");
-        }
         const amount = this._clamp(Number(this._editValue("schedule_amount")), 10, 500);
         const intervalHours = this._clamp(Number(this._editValue("schedule_days")), 1, 10) * 24;
-        await this._setNumber(entities.duration, amount);
-        await this._setNumber(entities.interval, intervalHours);
+        if (entities.duration) {
+          await this._setNumber(entities.duration, amount);
+        }
+        if (entities.interval) {
+          await this._setNumber(entities.interval, intervalHours);
+        }
         await this._saveScheduleAfterEdit("Schedule updated", {
           amount_ml: amount,
           interval_hours: intervalHours,
@@ -5392,10 +5417,11 @@ class GrowcubeCard extends HTMLElement {
         } else if (action === "toggle-smart-daytime") {
           event.stopPropagation();
           const nextDaytime = !this._isOn(this._entities().smart_daytime_watering);
-          this._toggleSwitch(this._entities().smart_daytime_watering)
-            .then(() => this._saveScheduleAfterEdit("Daytime watering updated", {
-              smart_daytime_watering: nextDaytime,
-            }))
+          const daytimeEntity = this._entities().smart_daytime_watering;
+          const entityUpdate = daytimeEntity ? this._toggleSwitch(daytimeEntity) : Promise.resolve();
+          entityUpdate.then(() => this._saveScheduleAfterEdit("Daytime watering updated", {
+            smart_daytime_watering: nextDaytime,
+          }))
             .catch((error) => this._showError(error?.message || "Could not update daytime watering"));
         } else if (action === "reset" || action === "delete-plant") {
           event.stopPropagation();
