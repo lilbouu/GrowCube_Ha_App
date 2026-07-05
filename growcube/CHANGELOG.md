@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.49
+
+- Fix Lovelace card installation on a clean Home Assistant system by checking only the mounted root such as `/config`, then creating `/config/www/growcube` when needed.
+
 ## 0.2.48
 
 - Serve the Lovelace card directly from the add-on ingress API when Home Assistant does not mount `/config` into the add-on container.

@@ -2316,8 +2316,9 @@ def install_lovelace_card() -> None:
         )
     copied = False
     for target_path in CARD_TARGET_PATHS:
-        if not target_path.parent.parent.exists():
-            LOGGER.info("Skipping GrowCube Lovelace card install path %s; base directory is not mounted", target_path)
+        mount_root = card_target_mount_root(target_path)
+        if mount_root is not None and not mount_root.exists():
+            LOGGER.info("Skipping GrowCube Lovelace card install path %s; mount root %s is not mounted", target_path, mount_root)
             continue
         try:
             target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2341,6 +2342,12 @@ def install_lovelace_card() -> None:
             LOGGER.warning("Could not copy GrowCube Lovelace card to %s: %s", target_path, err)
     if not copied:
         LOGGER.warning("GrowCube Lovelace card was not installed; Home Assistant config directory is not mounted")
+
+
+def card_target_mount_root(target_path: Path) -> Path | None:
+    if not target_path.is_absolute() or len(target_path.parts) < 2:
+        return None
+    return Path(target_path.parts[0], target_path.parts[1])
 
 
 def rendered_lovelace_card() -> str:
