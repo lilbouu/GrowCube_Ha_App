@@ -50,7 +50,7 @@ OPTIONS_PATH = DATA_DIR / "options.json"
 APP_DIR = Path(__file__).parent
 CARD_SOURCE_PATH = APP_DIR / "www" / "growcube-card.js"
 CARD_IMAGE_SOURCE_DIR = APP_DIR / "www" / "images"
-CARD_VERSION = "0.2.26"
+CARD_VERSION = "0.2.27"
 CARD_API_URL_PLACEHOLDER = "__GROWCUBE_ADDON_API_URL__"
 DEFAULT_INGRESS_PORT = 8099
 CLOUD_CATALOG_HOSTS = ("https://api.growcube.cc", "http://api.growcube.cc")
@@ -686,6 +686,8 @@ class GrowCubeManager:
         lookup = str(device_key or "").strip()
         safe_lookup = mqtt_safe_id(lookup)
         with self.lock:
+            if lookup in {"growcube", "local_growcube"} and len(self.devices) == 1:
+                return next(iter(self.devices.values()))
             for state in self.devices.values():
                 aliases = {
                     state.id,

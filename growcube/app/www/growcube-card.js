@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.26-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.27-addon-compat";
 const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
@@ -822,7 +822,15 @@ class GrowcubeCard extends HTMLElement {
 
   _apiDeviceIdHint() {
     const record = this._deviceRecord();
-    return String(record?.host || record?.device_id || this._deviceIdHint() || "").trim();
+    const recordHint = String(record?.host || record?.device_id || "").trim();
+    if (recordHint && !["growcube", "local_growcube"].includes(recordHint)) {
+      return recordHint;
+    }
+    const fallback = String(this._deviceIdHint() || "").trim();
+    if (!fallback || ["growcube", "local_growcube"].includes(fallback)) {
+      return "";
+    }
+    return fallback;
   }
 
   _apiHistoryState(channel = this._channelKey()) {
