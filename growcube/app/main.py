@@ -67,8 +67,6 @@ PLANT_SEARCH_CACHE_TTL_SECONDS = 15 * 60
 _SUPERVISOR_INGRESS_URL_CACHE: str | None = None
 CARD_TARGET_PATHS = (
     Path("/config/www/growcube/growcube-card.js"),
-    Path("/homeassistant/www/growcube/growcube-card.js"),
-    Path("/homeassistant_config/www/growcube/growcube-card.js"),
 )
 CHANNEL_NAMES = ("A", "B", "C", "D")
 GROWCUBE_TANK_CAPACITY_ML = 1500
@@ -1904,8 +1902,6 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
                 self._write_html(web_ui_html())
             elif parsed.path == "/health":
                 self._write_json({"ok": True})
-            elif parsed.path == "/growcube-card.js" or re.fullmatch(r"/growcube-card-\d+\.\d+\.\d+\.js", parsed.path):
-                self._write_javascript(rendered_lovelace_card())
             elif parsed.path == "/plants/search":
                 query = first_query_value(params, "query")
                 plants = search_plants(query)
@@ -2011,24 +2007,6 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
-
-    def _write_javascript(self, script: str, status: HTTPStatus = HTTPStatus.OK) -> None:
-        body = script.encode("utf-8")
-        LOGGER.info(
-            "Ingress JavaScript response remote=%s path=%s status=%s bytes=%s",
-            self.client_address[0],
-            urlparse(self.path).path,
-            int(status),
-            len(body),
-        )
-        self.send_response(int(status))
-        self._send_cors_headers()
-        self.send_header("Content-Type", "text/javascript; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
 
 def start_ingress_api_server() -> ThreadingHTTPServer:
     port = int(os.environ.get("GROWCUBE_INGRESS_PORT") or DEFAULT_INGRESS_PORT)
@@ -2307,13 +2285,6 @@ def install_lovelace_card() -> None:
         return
     card_source = rendered_lovelace_card()
     card_version = lovelace_card_version(card_source)
-    ingress_url = cached_supervisor_ingress_url()
-    if ingress_url:
-        LOGGER.info(
-            "GrowCube Lovelace card ingress resource: %s/growcube-card-%s.js",
-            ingress_url,
-            card_version or "latest",
-        )
     copied = False
     for target_path in CARD_TARGET_PATHS:
         mount_root = card_target_mount_root(target_path)
@@ -2354,7 +2325,7 @@ def rendered_lovelace_card() -> str:
     source = CARD_SOURCE_PATH.read_text(encoding="utf-8")
     api_url = cached_supervisor_ingress_url()
     if api_url:
-        LOGGER.info("GrowCube Lovelace card will use ingress API %s", api_url)
+        LOGGER.debug("GrowCube Lovelace card will use ingress API %s", api_url)
     else:
         LOGGER.warning("GrowCube ingress URL was not discovered; card will use fallback API paths")
     return source.replace(CARD_API_URL_PLACEHOLDER, api_url)

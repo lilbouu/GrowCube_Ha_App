@@ -111,25 +111,18 @@ The GrowCube add-on log should contain:
 
 ```text
 GrowCube Lovelace card copied to /config/www/growcube/growcube-card.js
-GrowCube Lovelace card copied to /config/www/growcube/growcube-card-0.2.49.js
+GrowCube Lovelace card copied to /config/www/growcube/growcube-card-0.2.50.js
 ```
 
 Home Assistant serves that file as:
 
 ```text
-/local/growcube/growcube-card-0.2.49.js
+/local/growcube/growcube-card-0.2.50.js
 ```
 
 If this URL returns `404 Not Found`, check that the log line above is present.
 If `/config/www` did not exist before, restart Home Assistant Core once so the
 `/local` static path is picked up.
-
-If the add-on log says the Home Assistant config directory is not mounted, use
-the ingress resource URL printed by the add-on instead:
-
-```text
-GrowCube Lovelace card ingress resource: /api/hassio_ingress/.../growcube-card-0.2.49.js
-```
 
 Add it as a Lovelace resource:
 
@@ -138,7 +131,7 @@ Add it as a Lovelace resource:
 3. Add a JavaScript module resource:
 
 ```text
-/local/growcube/growcube-card-0.2.49.js
+/local/growcube/growcube-card-0.2.50.js
 ```
 
 Then create or edit a dashboard and add a manual card:

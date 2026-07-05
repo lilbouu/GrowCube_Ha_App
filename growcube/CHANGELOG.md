@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.50
+
+- Remove temporary Lovelace ingress-resource fallback and extra card install paths now that `/config/www/growcube` installs correctly.
+- Keep port 8099 as the internal ingress API port only, without exposing an extra add-on port mapping.
+
 ## 0.2.49
 
 - Fix Lovelace card installation on a clean Home Assistant system by checking only the mounted root such as `/config`, then creating `/config/www/growcube` when needed.
