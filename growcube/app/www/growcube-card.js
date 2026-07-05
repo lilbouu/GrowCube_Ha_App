@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.41-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.42-addon-compat";
 const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
@@ -105,6 +105,10 @@ class GrowcubeCard extends HTMLElement {
     return entityId && this._hass ? this._hass.states[entityId] : undefined;
   }
 
+  _looksLikeEntityId(value) {
+    return /^[a-z_]+\.[a-z0-9_]+$/i.test(String(value || "").trim());
+  }
+
   _selectedDeviceId() {
     const queryDevice = new URLSearchParams(window.location?.search || "").get("device");
     const configured = this._config.device_id || this._config.device_prefix || this._config.entity_prefix || this._config.device || "";
@@ -134,6 +138,7 @@ class GrowcubeCard extends HTMLElement {
       ...(record.channels[channel] || {}),
       plant_name: values.plant_name || record.channels[channel]?.plant_name || "",
       photo_url: this._plantImageUrl(values.photo_url || record.channels[channel]?.photo_url || ""),
+      image_url: this._plantImageUrl(values.image_url || values.photo_url || record.channels[channel]?.image_url || record.channels[channel]?.photo_url || ""),
       configured: values.configured ?? record.channels[channel]?.configured ?? true,
     };
   }
@@ -442,6 +447,8 @@ class GrowcubeCard extends HTMLElement {
           ...nextChannel,
           plant_name: nextChannel.plant_name || previousChannel.plant_name || "",
           photo_url: nextChannel.photo_url || previousChannel.photo_url || "",
+          image_url: nextChannel.image_url || previousChannel.image_url || nextChannel.photo_url || previousChannel.photo_url || "",
+          photo_url_entity: nextChannel.photo_url_entity || previousChannel.photo_url_entity || "",
           configured: nextChannel.configured ?? previousChannel.configured,
         };
       });
@@ -629,7 +636,9 @@ class GrowcubeCard extends HTMLElement {
       || this._entityFromPeer("sensor", moisture, [`_moisture_${channel}`], `_history_count_${channel}`);
     const entities = {
       name: mappedChannelEntities.name || this._entityBySuffix("text", `_plant_name_${channel}`),
-      photo_url: mappedChannelEntities.photo_url || this._entityBySuffix("text", `_plant_photo_url_${channel}`),
+      photo_url: mappedChannelEntities.photo_url_entity
+        || (this._looksLikeEntityId(mappedChannelEntities.photo_url) ? mappedChannelEntities.photo_url : "")
+        || this._entityBySuffix("text", `_plant_photo_url_${channel}`),
       plant_configured: mappedChannelEntities.plant_configured || this._entityBySuffix("binary_sensor", [
         `_plant_${channel}_configured`,
         `_plant_configured_${channel}`,
@@ -1128,7 +1137,7 @@ class GrowcubeCard extends HTMLElement {
 
   _currentPlantPhotoUrl(channel = this._channelKey()) {
     const channelMeta = this._deviceRecord()?.channels?.[channel] || {};
-    return this._resolvedPlantPhotoUrl(channelMeta.photo_url, this._entities(channel).photo_url);
+    return this._resolvedPlantPhotoUrl(channelMeta.image_url, channelMeta.photo_url, this._entities(channel).photo_url);
   }
 
   _modeOptions() {
@@ -1587,6 +1596,7 @@ class GrowcubeCard extends HTMLElement {
           ...values,
           plant_name: apiResult.plant_name || values.plant_name,
           photo_url: apiResult.photo_url || values.photo_url,
+          image_url: apiResult.image_url || apiResult.photo_url || values.photo_url,
           configured: apiResult.configured ?? values.configured,
         });
         this._dashboardDevicesLoadedAt = 0;
@@ -3686,14 +3696,14 @@ class GrowcubeCard extends HTMLElement {
   }
 
   _plantRowTemplate({ channel, entities, deviceId = "", metadata = {} }) {
-    const photoUrl = this._resolvedPlantPhotoUrl(metadata.photo_url, entities.photo_url);
+    const photoUrl = this._resolvedPlantPhotoUrl(metadata.image_url, metadata.photo_url, entities.photo_url);
     const name = metadata.plant_name || this._entityDisplay(entities.name, this._channelName(channel));
     const moisture = this._entityDisplay(entities.moisture, "Unknown");
     const mode = this._normalizeMode(this._entityState(entities.mode, "Disabled"));
     return `
       <div class="plant-row" data-action="navigate-channel" data-channel="${this._escape(channel)}" data-device-id="${this._escape(deviceId)}" role="button" tabindex="0">
         <div class="plant-photo">
-          ${photoUrl ? `<img src="${this._escape(photoUrl)}" alt="">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
+          ${photoUrl ? `<img src="${this._escape(photoUrl)}" alt="" referrerpolicy="no-referrer">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
         </div>
         <div class="plant-meta">
           <div class="title">${this._escape(name)}</div>
@@ -3934,7 +3944,7 @@ class GrowcubeCard extends HTMLElement {
     return `
       <div class="card summary" data-action="navigate">
         <div class="header">
-          <div class="plant-icon">${photoUrl ? `<img src="${this._escape(photoUrl)}" alt="">` : '<ha-icon icon="mdi:flower"></ha-icon>'}</div>
+          <div class="plant-icon">${photoUrl ? `<img src="${this._escape(photoUrl)}" alt="" referrerpolicy="no-referrer">` : '<ha-icon icon="mdi:flower"></ha-icon>'}</div>
           <div>
             <div class="title">${this._escape(this._plantName())}</div>
             <div class="subtitle">${this._escape(this._config.channel || this._channelLabel())}</div>
@@ -3986,7 +3996,7 @@ class GrowcubeCard extends HTMLElement {
           <div class="plant-main plant-section">
             <div class="plant-titlebar">
               <div class="plant-photo">
-                ${photoUrl ? `<img src="${this._escape(photoUrl)}" alt="">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
+                ${photoUrl ? `<img src="${this._escape(photoUrl)}" alt="" referrerpolicy="no-referrer">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
               </div>
               <div>
                 <div class="title" data-action="edit-plant-name" role="button" tabindex="0">${this._escape(this._plantName())}</div>
@@ -4051,6 +4061,7 @@ class GrowcubeCard extends HTMLElement {
     const category = profile.category || "Plant profile";
     const channelMeta = this._deviceRecord()?.channels?.[this._channelKey()] || {};
     const photoUrl = this._resolvedPlantPhotoUrl(
+      channelMeta.image_url,
       channelMeta.photo_url,
       data.entities.photo_url,
       this._catalogImageUrl(this._plantWizardSelected || {}),
@@ -4080,7 +4091,7 @@ class GrowcubeCard extends HTMLElement {
             <div class="profile-panel">
               <div class="profile-hero">
                 <div class="profile-photo">
-                  ${photoUrl ? `<img src="${this._escape(photoUrl)}" alt="">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
+                  ${photoUrl ? `<img src="${this._escape(photoUrl)}" alt="" referrerpolicy="no-referrer">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
                 </div>
                 <div>
                   <div class="title">${this._escape(this._plantName())}</div>
@@ -4884,7 +4895,7 @@ class GrowcubeCard extends HTMLElement {
       <div class="profile-panel">
         <div class="profile-hero">
           <div class="profile-photo">
-            ${imageUrl ? `<img src="${this._escape(imageUrl)}" alt="">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
+            ${imageUrl ? `<img src="${this._escape(imageUrl)}" alt="" referrerpolicy="no-referrer">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
           </div>
           <div>
             <div class="title">${this._escape(name)}</div>
@@ -4980,7 +4991,7 @@ class GrowcubeCard extends HTMLElement {
     return `
       <div class="wizard-review">
         <div class="plant-photo">
-          ${photoUrl ? `<img src="${this._escape(photoUrl)}" alt="">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
+          ${photoUrl ? `<img src="${this._escape(photoUrl)}" alt="" referrerpolicy="no-referrer">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
         </div>
         <div>
           <div class="title">${this._escape(this._plantWizardName || "New plant")}</div>
@@ -4997,7 +5008,7 @@ class GrowcubeCard extends HTMLElement {
     return `
       <div class="plant-row" data-action="select-catalog-plant" data-index="${index}" role="button" tabindex="0">
         <div class="plant-photo">
-          ${imageUrl ? `<img src="${this._escape(imageUrl)}" alt="">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
+          ${imageUrl ? `<img src="${this._escape(imageUrl)}" alt="" referrerpolicy="no-referrer">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
         </div>
         <div class="plant-meta">
           <div class="title">${this._escape(name)}</div>

@@ -389,6 +389,7 @@ class GrowCubeManager:
             "configured": state.channels[channel].plant_configured and config.configured,
             "plant_name": config.plant_name,
             "photo_url": config.photo_url,
+            "image_url": config.photo_url,
             "type_category": config.type_category,
             "type_description": config.type_description,
             "temp_min": config.temp_min,
@@ -422,6 +423,8 @@ class GrowCubeManager:
                     **dashboard_channel_entities(device_id, channel),
                     "plant_name": state.channels[index].config.plant_name,
                     "photo_url": state.channels[index].config.photo_url,
+                    "image_url": state.channels[index].config.photo_url,
+                    "photo_url_entity": dashboard_channel_entities(device_id, channel)["photo_url"],
                     "configured": state.channels[index].plant_configured and state.channels[index].config.configured,
                 }
                 for index, channel in enumerate("abcd")
