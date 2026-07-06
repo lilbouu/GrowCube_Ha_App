@@ -1925,8 +1925,15 @@ dashboardCard._detailBackPath = function() {
 };
 
 async function fetchJson(path) {
-  const response = await fetch(path, {cache: "no-store"});
-  const data = await response.json();
+  const url = /^https?:[/][/]/i.test(String(path)) ? path : `${addonApiUrl}/${String(path).replace(/^[/]+/, "")}`;
+  const response = await fetch(url, {cache: "no-store"});
+  const text = await response.text();
+  let data;
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch (error) {
+    throw new Error(`API returned non-JSON for ${url}: ${response.status} ${text.slice(0, 160)}`);
+  }
   if (!response.ok || data.error) {
     throw new Error(data.error || response.statusText);
   }

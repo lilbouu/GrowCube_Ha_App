@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.52-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.53-addon-compat";
 const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
@@ -243,7 +243,13 @@ class GrowcubeCard extends HTMLElement {
       const body = await response.text();
       throw new Error(`GrowCube add-on API failed: ${response.status} ${response.statusText}: ${body.slice(0, 240)}`);
     }
-    const result = await response.json();
+    const body = await response.text();
+    let result;
+    try {
+      result = body ? JSON.parse(body) : {};
+    } catch (error) {
+      throw new Error(`GrowCube add-on API returned non-JSON: ${url}: ${body.slice(0, 240)}`);
+    }
     console.info("[GrowCube] add-on API response", { url, elapsedMs: Math.round(performance.now() - started), keys: Object.keys(result || {}) });
     return result;
   }
@@ -1511,7 +1517,7 @@ class GrowcubeCard extends HTMLElement {
       this._showToast(`Watering started: ${amountMl} mL`);
     } catch (error) {
       this._wateringOpen = false;
-      this._showError("Watering failed");
+      this._showError(error?.message || "Watering failed");
     }
   }
 
@@ -1551,7 +1557,7 @@ class GrowcubeCard extends HTMLElement {
     } catch (error) {
       this._reservoirOpen = false;
       this._reservoirTargetEntity = "";
-      this._showError("Could not update capacity");
+      this._showError(error?.message || "Could not update capacity");
     }
   }
 
@@ -2095,6 +2101,22 @@ class GrowcubeCard extends HTMLElement {
           border-radius: 14px;
           background: var(--ha-card-background, var(--card-background-color));
           border: 1px solid var(--divider-color);
+        }
+
+        .gc-icon {
+          display: inline-flex;
+          width: 24px;
+          height: 24px;
+          align-items: center;
+          justify-content: center;
+          color: currentColor;
+          flex: 0 0 auto;
+        }
+
+        .gc-icon svg {
+          display: block;
+          width: 100%;
+          height: 100%;
         }
 
         ha-card.detail-card {
@@ -3577,6 +3599,7 @@ class GrowcubeCard extends HTMLElement {
       ${this._toast ? `<div class="toast">${this._escape(this._toast)}</div>` : ""}
     `;
 
+    this._renderStandaloneIcons();
     this._bindEvents();
     this._mountHistoryGraph(entities);
     if (detail) {
@@ -3600,6 +3623,50 @@ class GrowcubeCard extends HTMLElement {
       return this._activityOverviewTemplate();
     }
     return this._statusTemplate({ entities });
+  }
+
+  _renderStandaloneIcons() {
+    if (!window.GROWCUBE_STANDALONE_WEBUI || !this.shadowRoot) {
+      return;
+    }
+    this.shadowRoot.querySelectorAll("ha-icon").forEach((element) => {
+      const icon = element.getAttribute("icon") || "";
+      const replacement = document.createElement("span");
+      replacement.className = "gc-icon";
+      replacement.setAttribute("aria-hidden", "true");
+      replacement.innerHTML = `<svg viewBox="0 0 24 24" focusable="false">${this._standaloneIconSvg(icon)}</svg>`;
+      element.replaceWith(replacement);
+    });
+  }
+
+  _standaloneIconSvg(icon) {
+    const common = 'fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"';
+    const filled = 'fill="currentColor"';
+    const icons = {
+      "mdi:refresh": `<path ${common} d="M20 6v5h-5"/><path ${common} d="M19 11a7 7 0 1 0-2.1 5"/>`,
+      "mdi:dots-vertical": `<circle ${filled} cx="12" cy="5" r="1.8"/><circle ${filled} cx="12" cy="12" r="1.8"/><circle ${filled} cx="12" cy="19" r="1.8"/>`,
+      "mdi:chevron-up": `<path ${common} d="m6 15 6-6 6 6"/>`,
+      "mdi:chevron-down": `<path ${common} d="m6 9 6 6 6-6"/>`,
+      "mdi:chevron-right": `<path ${common} d="m9 6 6 6-6 6"/>`,
+      "mdi:arrow-left": `<path ${common} d="M19 12H5"/><path ${common} d="m12 5-7 7 7 7"/>`,
+      "mdi:check": `<path ${common} d="m5 12 4 4 10-10"/>`,
+      "mdi:close": `<path ${common} d="M6 6l12 12M18 6 6 18"/>`,
+      "mdi:information-outline": `<circle ${common} cx="12" cy="12" r="9"/><path ${common} d="M12 10v6"/><circle ${filled} cx="12" cy="7" r="1"/>`,
+      "mdi:delete-outline": `<path ${common} d="M6 7h12M10 7V5h4v2M8 7l1 12h6l1-12"/>`,
+      "mdi:alert-circle": `<circle ${common} cx="12" cy="12" r="9"/><path ${common} d="M12 7v6"/><circle ${filled} cx="12" cy="17" r="1"/>`,
+      "mdi:alert": `<path ${common} d="M12 4 3 20h18L12 4Z"/><path ${common} d="M12 9v5"/><circle ${filled} cx="12" cy="17" r="1"/>`,
+      "mdi:cube-outline": `<path ${common} d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z"/><path ${common} d="M4 7.5 12 12l8-4.5M12 12v9"/>`,
+      "mdi:sprout": `<path ${common} d="M12 20V9"/><path ${common} d="M12 10C8 5 4 6 3 11c5 1 8-1 9-1Z"/><path ${common} d="M12 12c2-5 7-6 9-2-4 3-7 3-9 2Z"/>`,
+      "mdi:flower": `<circle ${common} cx="12" cy="12" r="2.2"/><circle ${common} cx="12" cy="5" r="2.5"/><circle ${common} cx="12" cy="19" r="2.5"/><circle ${common} cx="5" cy="12" r="2.5"/><circle ${common} cx="19" cy="12" r="2.5"/>`,
+      "mdi:pot-mix-outline": `<path ${common} d="M7 10h10l-1 9H8l-1-9Z"/><path ${common} d="M6 10h12M10 10c-1-4-4-4-5-2M14 10c1-5 5-5 6-2"/>`,
+      "mdi:water-pump": `<path ${common} d="M5 19h14M7 19V9h8v10M9 9V6h4v3M15 12h3v4"/><path ${common} d="M19 16c1.5 1.6 1.5 3 0 4-1.5-1-1.5-2.4 0-4Z"/>`,
+      "mdi:message-alert-outline": `<path ${common} d="M5 5h14v10H9l-4 4V5Z"/><path ${common} d="M12 7v4"/><circle ${filled} cx="12" cy="13" r="1"/>`,
+      "mdi:chart-bell-curve": `<path ${common} d="M4 18h16"/><path ${common} d="M5 17c3 0 3-10 7-10s4 10 7 10"/>`,
+      "mdi:checkbox-blank-circle-outline": `<circle ${common} cx="12" cy="12" r="7"/>`,
+      "mdi:water-alert": `<path ${common} d="M12 3c4 5 6 8 6 12a6 6 0 0 1-12 0c0-4 2-7 6-12Z"/><path ${common} d="M12 9v4"/><circle ${filled} cx="12" cy="16" r="1"/>`,
+      "mdi:lock-alert": `<rect ${common} x="6" y="10" width="12" height="10" rx="2"/><path ${common} d="M9 10V7a3 3 0 0 1 6 0v3M12 13v3"/>`,
+    };
+    return icons[icon] || `<circle ${common} cx="12" cy="12" r="8"/><path ${common} d="M12 8v4l3 3"/>`;
   }
 
   _channels() {
@@ -5656,7 +5723,7 @@ class GrowcubeCard extends HTMLElement {
           event.stopPropagation();
           this._press(element.dataset.entity || this._entities().mark_tank_full)
             .then(() => this._showToast("Tank marked full"))
-            .catch(() => this._showError("Could not update tank"));
+            .catch((error) => this._showError(error?.message || "Could not update tank"));
         } else if (action === "refresh-activity") {
           event.stopPropagation();
           this._refreshAllHistory();
@@ -5710,7 +5777,7 @@ class GrowcubeCard extends HTMLElement {
           const capacity = Number(element.dataset.capacity) || 1500;
           this._setNumber(element.dataset.entity || this._entities().tank_capacity, capacity)
             .then(() => this._showToast(`Reservoir set to ${capacity} mL`))
-            .catch(() => this._showError("Could not update capacity"));
+            .catch((error) => this._showError(error?.message || "Could not update capacity"));
         } else if (action === "custom-capacity") {
           event.stopPropagation();
           this._openReservoirGuide(element.dataset.entity, element.dataset.currentCapacity);

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.53
+
+- Route standalone Web UI API calls through the absolute Home Assistant ingress URL.
+- Render standalone Web UI card icons inside the card shadow DOM without depending on Home Assistant `ha-icon`.
+- Show backend error details for manual watering and tank update failures.
+
 ## 0.2.52
 
 - Add standalone Web UI icon rendering for the GrowCube card inside Home Assistant ingress.
