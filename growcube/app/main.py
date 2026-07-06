@@ -60,11 +60,13 @@ CARD_IMAGE_SOURCE_DIR = APP_DIR / "www" / "images"
 CARD_API_URL_PLACEHOLDER = "__GROWCUBE_ADDON_API_URL__"
 DEFAULT_INGRESS_PORT = 8099
 DEFAULT_INGRESS_ALLOWED_CIDRS = ("127.0.0.0/8", "::1/128", "172.30.0.0/16")
-CLOUD_CATALOG_HOSTS = ("https://api.growcube.cc", "http://api.growcube.cc")
+CLOUD_CATALOG_HOSTS = ("https://api.growcube.cc",)
 CLOUD_CATALOG_LIMIT = 40
-CLOUD_CATALOG_TIMEOUT_SECONDS = 8
+CLOUD_CATALOG_TIMEOUT_SECONDS = 20
 _PLANT_SEARCH_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_PLANT_SEARCH_FAILURE_CACHE: dict[str, tuple[float, str]] = {}
 PLANT_SEARCH_CACHE_TTL_SECONDS = 15 * 60
+PLANT_SEARCH_FAILURE_TTL_SECONDS = 60
 _SUPERVISOR_INGRESS_URL_CACHE: str | None = None
 CARD_TARGET_PATHS = (
     Path("/config/www/growcube/growcube-card.js"),
@@ -2414,6 +2416,10 @@ def search_plants(query: str) -> list[dict[str, Any]]:
     if cached is not None and now - cached[0] < PLANT_SEARCH_CACHE_TTL_SECONDS:
         LOGGER.info("Plant search cache hit query=%r results=%s", query, len(cached[1]))
         return cached[1]
+    failed = _PLANT_SEARCH_FAILURE_CACHE.get(cache_key)
+    if failed is not None and now - failed[0] < PLANT_SEARCH_FAILURE_TTL_SECONDS:
+        LOGGER.warning("Plant search recent cloud failure query=%r error=%s", query, failed[1])
+        return []
     LOGGER.info("Searching GrowCube cloud catalog for %r", query)
     try:
         data = fetch_catalog_json(f"/api/en/plants/name/{quote(query, safe='')}")
@@ -2422,6 +2428,7 @@ def search_plants(query: str) -> list[dict[str, Any]]:
             LOGGER.warning("Plant search cloud failed; returning stale cache query=%r results=%s", query, len(cached[1]))
             return cached[1]
         LOGGER.warning("Plant search cloud failed; returning empty result query=%r error=%s", query, err)
+        _PLANT_SEARCH_FAILURE_CACHE[cache_key] = (now, str(err))
         return []
     plants = data.get("plants")
     if not isinstance(plants, list):
@@ -2429,6 +2436,7 @@ def search_plants(query: str) -> list[dict[str, Any]]:
         return []
     result = [plant_from_api(plant) for plant in plants[:CLOUD_CATALOG_LIMIT] if isinstance(plant, dict)]
     _PLANT_SEARCH_CACHE[cache_key] = (now, result)
+    _PLANT_SEARCH_FAILURE_CACHE.pop(cache_key, None)
     LOGGER.info("Plant search cache stored query=%r results=%s", query, len(result))
     return result
 
@@ -2528,15 +2536,18 @@ def fetch_catalog_json(path: str) -> dict[str, Any]:
             started = time.monotonic()
             with urlopen(request, timeout=CLOUD_CATALOG_TIMEOUT_SECONDS) as response:
                 body = response.read()
+                wire_bytes = len(body)
                 if response.headers.get("Content-Encoding", "").lower() == "gzip":
                     body = gzip.decompress(body)
                 data = json.loads(body.decode("utf-8"))
                 LOGGER.info(
-                    "GrowCube cloud catalog response url=%s%s status=%s bytes=%s elapsed_ms=%s keys=%s",
+                    "GrowCube cloud catalog response url=%s%s status=%s bytes=%s wire_bytes=%s encoding=%s elapsed_ms=%s keys=%s",
                     host,
                     path,
                     response.status,
                     len(body),
+                    wire_bytes,
+                    response.headers.get("Content-Encoding", ""),
                     round((time.monotonic() - started) * 1000),
                     sorted(data.keys()) if isinstance(data, dict) else type(data).__name__,
                 )

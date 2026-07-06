@@ -1,12 +1,16 @@
 # Changelog
 
+## 0.2.59
+
+- Increase the GrowCube cloud catalog timeout and log compressed/uncompressed response sizes so larger plant searches such as `rose` can complete instead of timing out too early.
+
 ## 0.2.58
 
 - Remove static GrowCube device setup from the add-on configuration; devices are now managed from the Web UI and stored in add-on data.
 - Publish MQTT Discovery/state explicitly when a device is added from the Web UI so Home Assistant can discover it without an add-on restart.
 - Make Web UI discovery default to one-click local network search while keeping manual network entry behind an optional control.
 - Restrict the ingress API handler to loopback and configured Home Assistant/Supervisor CIDRs instead of allowing all private LAN addresses.
-- Keep plant search usable when the GrowCube cloud catalog times out by returning an empty result instead of a Web UI API error.
+- Keep plant search usable when the GrowCube cloud catalog times out by returning an empty result instead of a Web UI API error, and avoid repeated slow retries for the same query.
 
 ## 0.2.57
 
