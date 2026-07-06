@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.53-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.55-addon-compat";
 const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
@@ -2708,6 +2708,7 @@ class GrowcubeCard extends HTMLElement {
         }
 
         .detail-flat {
+          position: relative;
           width: 100%;
           max-width: 100%;
           padding: 0;
@@ -2715,6 +2716,16 @@ class GrowcubeCard extends HTMLElement {
           border: 0;
           border-radius: 0;
           background: transparent;
+        }
+
+        .webui-back-button {
+          position: absolute;
+          top: 8px;
+          left: 8px;
+          z-index: 2;
+          background: var(--ha-card-background, var(--card-background-color));
+          border-color: var(--divider-color);
+          box-shadow: 0 8px 18px rgba(0, 0, 0, 0.12);
         }
 
         .plant-dashboard {
@@ -4096,16 +4107,16 @@ class GrowcubeCard extends HTMLElement {
       : `${data.scheduleDuration} mL / ${Math.max(1, Math.round(data.interval / 24))}d`;
     const photoUrl = this._currentPlantPhotoUrl();
     const standaloneBack = window.GROWCUBE_STANDALONE_WEBUI ? `
-      <button type="button" class="icon-button" data-action="webui-back" aria-label="Back to dashboard">
+      <button type="button" class="icon-button webui-back-button" data-action="webui-back" aria-label="Back to dashboard">
         <ha-icon icon="mdi:arrow-left"></ha-icon>
       </button>
     ` : "";
     return `
       <div class="card detail detail-flat">
+        ${standaloneBack}
         <div class="plant-dashboard">
           <div class="plant-main plant-section">
             <div class="plant-titlebar">
-              ${standaloneBack}
               <div class="plant-photo">
                 ${photoUrl ? `<img src="${this._escape(photoUrl)}" alt="" referrerpolicy="no-referrer">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
               </div>

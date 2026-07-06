@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.55
+
+- Restore the original watering marker styling on the moisture chart.
+
+## 0.2.54
+
+- Move the standalone Web UI plant-detail back button to the upper-left overlay position so it no longer shifts the plant detail layout.
+- Increase watering marker contrast on the moisture chart.
+
 ## 0.2.53
 
 - Route standalone Web UI API calls through the absolute Home Assistant ingress URL.
