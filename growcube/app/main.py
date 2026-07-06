@@ -1680,7 +1680,7 @@ def web_ui_html() -> str:
       --error-color: #b42318;
       --warning-color: #b15d00;
       --success-color: #17803d;
-      --bg: #f6f8f9;
+      --bg: #eef2f4;
       --panel: var(--ha-card-background);
       --text: var(--primary-text-color);
       --muted: var(--secondary-text-color);
@@ -1716,6 +1716,7 @@ def web_ui_html() -> str:
       gap: 12px;
       min-height: 42px;
       margin-bottom: 8px;
+      padding: 0 12px;
     }
     .topbar-title {
       display: inline-flex;
@@ -1820,7 +1821,7 @@ def web_ui_html() -> str:
     }
     @media (max-width: 640px) {
       main { padding: 16px; }
-      .topbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+      .topbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; padding: 0; }
       .item { grid-template-columns: 1fr; display: grid; }
       .item button:not(.icon-control) { width: 100%; }
     }
