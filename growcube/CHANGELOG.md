@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.51
+
+- Make the add-on Web UI open the full GrowCube dashboard by default using the existing Lovelace card implementation.
+- Move GrowCube discovery, manual add, and removal controls into a Settings view.
+- Add standalone Web UI state and service-call adapters so dashboard controls work without manual Lovelace setup.
+
 ## 0.2.50
 
 - Remove temporary Lovelace ingress-resource fallback and extra card install paths now that `/config/www/growcube` installs correctly.

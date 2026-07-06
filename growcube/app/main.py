@@ -376,6 +376,25 @@ class GrowCubeManager:
         future.result(timeout=10)
         return {"ok": True, "device_id": device_id}
 
+    def entity_command_payload(self, params: dict[str, list[str]]) -> dict[str, Any]:
+        entity_id_value = first_query_value(params, "entity_id")
+        service = first_query_value(params, "service")
+        value = first_query_value(params, "value")
+        state, key = self.entity_from_id(entity_id_value)
+        if state is None or not key:
+            raise KeyError("entity not found")
+        if service in {"turn_on", "turn_off", "toggle"}:
+            if service == "toggle":
+                current = self.entity_state_value(state, key)
+                value = "OFF" if str(current).upper() == "ON" else "ON"
+            else:
+                value = "ON" if service == "turn_on" else "OFF"
+        elif service == "press":
+            value = "PRESS"
+        future = self.submit(self.handle_entity_command(state, key, value))
+        future.result(timeout=10)
+        return {"ok": True, "entity_id": entity_id_value, "key": key}
+
     def configure_channel_payload(self, device_id: str, channel_value: str, params: dict[str, list[str]]) -> dict[str, Any]:
         channel = validate_channel_key(channel_value)
         state = self.find_device(device_id) if device_id else next(iter(self.devices.values()), None)
@@ -411,6 +430,18 @@ class GrowCubeManager:
     def _dashboard_device(self, state: DeviceState) -> dict[str, Any]:
         device = self._state_to_dict(state)
         device_id = mqtt_device_unique_id(device)
+        entities = dashboard_device_entities(device_id)
+        channels = {
+            channel: {
+                **dashboard_channel_entities(device_id, channel),
+                "plant_name": state.channels[index].config.plant_name,
+                "photo_url": state.channels[index].config.photo_url,
+                "image_url": state.channels[index].config.photo_url,
+                "photo_url_entity": dashboard_channel_entities(device_id, channel)["photo_url"],
+                "configured": state.channels[index].plant_configured and state.channels[index].config.configured,
+            }
+            for index, channel in enumerate("abcd")
+        }
         return {
             "device_id": device_id,
             "host": state.host,
@@ -420,19 +451,30 @@ class GrowCubeManager:
             "error": state.error,
             "version": state.version or "",
             "addon_api_url": device.get("addon_api_url") or "",
-            "entities": dashboard_device_entities(device_id),
-            "channels": {
-                channel: {
-                    **dashboard_channel_entities(device_id, channel),
-                    "plant_name": state.channels[index].config.plant_name,
-                    "photo_url": state.channels[index].config.photo_url,
-                    "image_url": state.channels[index].config.photo_url,
-                    "photo_url_entity": dashboard_channel_entities(device_id, channel)["photo_url"],
-                    "configured": state.channels[index].plant_configured and state.channels[index].config.configured,
-                }
-                for index, channel in enumerate("abcd")
-            },
+            "entities": entities,
+            "channels": channels,
+            "states": dashboard_entity_states(device_id, device, entities, channels),
         }
+
+    def entity_from_id(self, entity_id_value: str) -> tuple[DeviceState | None, str]:
+        object_id = str(entity_id_value or "").split(".", 1)[-1]
+        with self.lock:
+            for state in self.devices.values():
+                device_id = mqtt_device_unique_id(self._state_to_dict(state))
+                prefix = f"growcube_{device_id}_"
+                if object_id.startswith(prefix):
+                    return state, object_id[len(prefix) :]
+        return None, ""
+
+    def entity_state_value(self, state: DeviceState, key: str) -> str:
+        device = self._state_to_dict(state)
+        device_id = mqtt_device_unique_id(device)
+        entities = dashboard_device_entities(device_id)
+        channels = {channel: dashboard_channel_entities(device_id, channel) for channel in "abcd"}
+        for entity_id_value, entity_state in dashboard_entity_states(device_id, device, entities, channels).items():
+            if entity_id_value.endswith(f"_{key}"):
+                return str(entity_state.get("state") or "")
+        return ""
 
     async def add_device(self, name: str, host: str, port: int = 8800) -> dict[str, Any]:
         host = host.strip()
@@ -1624,28 +1666,38 @@ def web_ui_html() -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>GrowCube Add-on</title>
+  <title>GrowCube</title>
   <style>
     :root {
       color-scheme: light dark;
+      --primary-text-color: #172026;
+      --secondary-text-color: #66757f;
+      --divider-color: #d9e0e4;
+      --card-background-color: #ffffff;
+      --ha-card-background: #ffffff;
+      --primary-color: #0b7fab;
+      --error-color: #b42318;
+      --warning-color: #b15d00;
+      --success-color: #17803d;
       --bg: #f6f8f9;
-      --panel: #ffffff;
-      --text: #172026;
-      --muted: #66757f;
-      --line: #d9e0e4;
-      --accent: #0b7fab;
-      --ok: #17803d;
-      --warn: #b15d00;
-      --bad: #b42318;
+      --panel: var(--ha-card-background);
+      --text: var(--primary-text-color);
+      --muted: var(--secondary-text-color);
+      --line: var(--divider-color);
+      --accent: var(--primary-color);
+      --ok: var(--success-color);
+      --warn: var(--warning-color);
+      --bad: var(--error-color);
     }
     @media (prefers-color-scheme: dark) {
       :root {
+        --primary-text-color: #edf3f6;
+        --secondary-text-color: #9aabb4;
+        --divider-color: #2d3a41;
+        --card-background-color: #171f24;
+        --ha-card-background: #171f24;
+        --primary-color: #4db6d8;
         --bg: #11161a;
-        --panel: #171f24;
-        --text: #edf3f6;
-        --muted: #9aabb4;
-        --line: #2d3a41;
-        --accent: #4db6d8;
       }
     }
     * { box-sizing: border-box; }
@@ -1655,11 +1707,26 @@ def web_ui_html() -> str:
       color: var(--text);
       font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
-    main { max-width: 980px; margin: 0 auto; padding: 24px; }
-    header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
-    h1 { margin: 0; font-size: 24px; font-weight: 650; }
+    main { max-width: 1120px; margin: 0 auto; padding: 18px; }
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+    h1 { margin: 0; font-size: 22px; font-weight: 650; }
     h2 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     p { margin: 4px 0 0; color: var(--muted); }
+    .tabs { display: inline-flex; gap: 6px; border: 1px solid var(--line); border-radius: 8px; padding: 3px; }
+    .tab {
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--muted);
+      padding: 8px 11px;
+    }
+    .tab.active { background: var(--accent); color: #fff; }
     section {
       background: var(--panel);
       border: 1px solid var(--line);
@@ -1716,52 +1783,108 @@ def web_ui_html() -> str:
     .dot.bad { background: var(--bad); }
     .empty { color: var(--muted); padding: 10px 0; }
     .error { color: var(--bad); }
+    .hidden { display: none; }
+    growcube-card { display: block; }
+    ha-card {
+      display: block;
+      color: var(--primary-text-color);
+      background: var(--ha-card-background);
+      border-radius: 8px;
+    }
+    ha-icon {
+      display: inline-flex;
+      width: 24px;
+      height: 24px;
+      align-items: center;
+      justify-content: center;
+      vertical-align: middle;
+    }
+    ha-icon::before {
+      content: "";
+      width: 1em;
+      height: 1em;
+      border-radius: 50%;
+      border: 2px solid currentColor;
+      opacity: .55;
+    }
     @media (max-width: 640px) {
       main { padding: 16px; }
-      header, .item { grid-template-columns: 1fr; display: grid; }
+      .topbar, .item { grid-template-columns: 1fr; display: grid; }
       .item button { width: 100%; }
     }
   </style>
 </head>
 <body>
 <main>
-  <header>
-    <div>
-      <h1>GrowCube Add-on</h1>
-      <p>Discover GrowCube devices, add them to the add-on, and monitor connection state.</p>
+  <div class="topbar">
+    <h1>GrowCube</h1>
+    <div class="tabs" role="tablist">
+      <button class="tab active" id="dashboardTab" type="button">Dashboard</button>
+      <button class="tab" id="settingsTab" type="button">Settings</button>
     </div>
-    <button class="secondary" id="refreshBtn">Refresh</button>
-  </header>
+  </div>
 
-  <section>
-    <h2>Devices</h2>
-    <div id="devices" class="list"><div class="empty">Loading devices...</div></div>
-  </section>
+  <div id="dashboardView">
+    <growcube-card id="growcubeDashboard"></growcube-card>
+  </div>
 
-  <section>
-    <h2>Discover</h2>
-    <div class="row">
-      <input id="networkInput" placeholder="Network, for example 192.168.1.0/24">
-      <button id="discoverBtn">Search network</button>
-    </div>
-    <p>Leave the network empty to scan the local /24 network detected by the add-on.</p>
-    <div id="discoverStatus" class="meta"></div>
-    <div id="discoverResults" class="list"></div>
-  </section>
+  <div id="settingsView" class="hidden">
+    <section>
+      <div class="row" style="justify-content: space-between;">
+        <h2>Devices</h2>
+        <button class="secondary" id="refreshBtn">Refresh</button>
+      </div>
+      <div id="devices" class="list"><div class="empty">Loading devices...</div></div>
+    </section>
 
-  <section>
-    <h2>Manual add</h2>
-    <div class="row">
-      <input id="hostInput" placeholder="GrowCube IP or host">
-      <input id="nameInput" placeholder="Name">
-      <button id="addManualBtn">Add device</button>
-    </div>
-  </section>
+    <section>
+      <h2>Discover</h2>
+      <div class="row">
+        <input id="networkInput" placeholder="Network, for example 192.168.1.0/24">
+        <button id="discoverBtn">Search network</button>
+      </div>
+      <p>Leave the network empty to scan the local /24 network detected by the add-on.</p>
+      <div id="discoverStatus" class="meta"></div>
+      <div id="discoverResults" class="list"></div>
+    </section>
+
+    <section>
+      <h2>Manual add</h2>
+      <div class="row">
+        <input id="hostInput" placeholder="GrowCube IP or host">
+        <input id="nameInput" placeholder="Name">
+        <button id="addManualBtn">Add device</button>
+      </div>
+    </section>
+  </div>
 </main>
+<script src="growcube-card.js"></script>
 <script>
+if (!customElements.get("ha-card")) customElements.define("ha-card", class extends HTMLElement {});
+if (!customElements.get("ha-icon")) customElements.define("ha-icon", class extends HTMLElement {});
+
 const devicesEl = document.getElementById("devices");
 const resultsEl = document.getElementById("discoverResults");
 const statusEl = document.getElementById("discoverStatus");
+const dashboardCard = document.getElementById("growcubeDashboard");
+const basePath = window.location.pathname.replace(/\/$/, "") || "/";
+const addonApiUrl = `${window.location.origin}${basePath === "/" ? "" : basePath}`;
+let dashboardPayload = {devices: []};
+
+dashboardCard._defaultNavigationPath = function(channel = undefined, deviceId = "") {
+  const params = new URLSearchParams(window.location.search || "");
+  const channelKey = this._channelKey(channel);
+  if (channelKey) params.set("view", `plant-${channelKey}`);
+  if (deviceId) params.set("device", deviceId);
+  return `${basePath}?${params.toString()}`;
+};
+
+dashboardCard._detailBackPath = function() {
+  const params = new URLSearchParams(window.location.search || "");
+  params.delete("view");
+  const query = params.toString();
+  return `${basePath}${query ? "?" + query : ""}`;
+};
 
 async function fetchJson(path) {
   const response = await fetch(path, {cache: "no-store"});
@@ -1789,6 +1912,79 @@ function deviceStatus(device) {
   return {text: "Disconnected", cls: "bad"};
 }
 
+function mergeStates(payload) {
+  const states = {};
+  for (const device of payload.devices || []) {
+    Object.assign(states, device.states || {});
+  }
+  return states;
+}
+
+function formatEntityState(entity) {
+  const unit = entity?.attributes?.unit_of_measurement || "";
+  if (!entity || entity.state === "unknown" || entity.state === "unavailable") {
+    return "Unknown";
+  }
+  return unit ? `${entity.state} ${unit}` : entity.state;
+}
+
+async function callService(domain, service, data = {}) {
+  const entityId = data.entity_id;
+  if (!entityId) return;
+  const params = new URLSearchParams({entity_id: entityId, domain, service});
+  if (Object.prototype.hasOwnProperty.call(data, "value")) params.set("value", data.value);
+  if (Object.prototype.hasOwnProperty.call(data, "option")) params.set("value", data.option);
+  if (Object.prototype.hasOwnProperty.call(data, "time")) params.set("value", data.time);
+  await fetchJson("entity/command?" + params.toString());
+  await refreshDashboard(true);
+}
+
+function updateDashboardCard() {
+  const states = mergeStates(dashboardPayload);
+  dashboardCard.hass = {
+    states,
+    callService,
+    formatEntityState,
+    callApi: async (method, path) => fetchJson(path.replace(/^growcube\\//, "")),
+  };
+}
+
+function cardConfigFromLocation() {
+  const params = new URLSearchParams(window.location.search || "");
+  const view = String(params.get("view") || "");
+  const match = view.match(/^plant-([abcd])$/i);
+  if (match) {
+    const channel = match[1].toLowerCase();
+    return {
+      title: `Plant ${channel.toUpperCase()}`,
+      name: `Plant ${channel.toUpperCase()}`,
+      channel: `Channel ${channel.toUpperCase()}`,
+      detail: true,
+      addon_api_url: addonApiUrl,
+    };
+  }
+  return {title: "GrowCube", overview: "dashboard", addon_api_url: addonApiUrl};
+}
+
+function applyCardConfigFromLocation() {
+  const next = cardConfigFromLocation();
+  const current = dashboardCard._webUiRouteKey || "";
+  const routeKey = JSON.stringify(next);
+  if (current !== routeKey) {
+    dashboardCard.setConfig(next);
+    dashboardCard._webUiRouteKey = routeKey;
+  }
+}
+
+async function refreshDashboard(force = false) {
+  dashboardPayload = await fetchJson("dashboard");
+  applyCardConfigFromLocation();
+  updateDashboardCard();
+  if (force) {
+    renderDevices(dashboardPayload);
+  }
+}
+
 function renderDevices(payload) {
   const devices = payload.devices || [];
   if (!devices.length) {
@@ -1813,7 +2009,9 @@ function renderDevices(payload) {
 }
 
 async function refreshDevices() {
-  renderDevices(await fetchJson("dashboard"));
+  dashboardPayload = await fetchJson("dashboard");
+  renderDevices(dashboardPayload);
+  updateDashboardCard();
 }
 
 async function addDevice(host, name) {
@@ -1857,11 +2055,31 @@ async function discoverDevices() {
 
 document.getElementById("refreshBtn").addEventListener("click", refreshDevices);
 document.getElementById("discoverBtn").addEventListener("click", discoverDevices);
+document.getElementById("dashboardTab").addEventListener("click", () => setActiveView("dashboard"));
+document.getElementById("settingsTab").addEventListener("click", () => setActiveView("settings"));
 document.getElementById("addManualBtn").addEventListener("click", async () => {
   const host = document.getElementById("hostInput").value.trim();
   const name = document.getElementById("nameInput").value.trim();
   if (!host) return;
   await addDevice(host, name);
+});
+
+function setActiveView(view) {
+  const settings = view === "settings";
+  document.getElementById("dashboardView").classList.toggle("hidden", settings);
+  document.getElementById("settingsView").classList.toggle("hidden", !settings);
+  document.getElementById("dashboardTab").classList.toggle("active", !settings);
+  document.getElementById("settingsTab").classList.toggle("active", settings);
+  if (settings) refreshDevices().catch(() => {});
+}
+
+window.addEventListener("location-changed", () => {
+  applyCardConfigFromLocation();
+  updateDashboardCard();
+});
+window.addEventListener("popstate", () => {
+  applyCardConfigFromLocation();
+  updateDashboardCard();
 });
 document.addEventListener("click", async (event) => {
   const addHost = event.target?.dataset?.add;
@@ -1870,10 +2088,10 @@ document.addEventListener("click", async (event) => {
   if (removeId) await removeDevice(removeId);
 });
 
-refreshDevices().catch((err) => {
+refreshDashboard(true).catch((err) => {
   devicesEl.innerHTML = '<div class="error">' + escapeHtml(err.message) + '</div>';
 });
-setInterval(() => refreshDevices().catch(() => {}), 5000);
+setInterval(() => refreshDashboard(true).catch(() => {}), 5000);
 </script>
 </body>
 </html>
@@ -1900,6 +2118,15 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
         try:
             if parsed.path == "/":
                 self._write_html(web_ui_html())
+            elif parsed.path == "/growcube-card.js":
+                self._write_text(rendered_lovelace_card(), "application/javascript; charset=utf-8")
+            elif parsed.path.startswith("/local/growcube/images/") or parsed.path.startswith("/images/"):
+                image_name = Path(parsed.path).name
+                image_path = CARD_IMAGE_SOURCE_DIR / image_name
+                if not image_path.is_file():
+                    self._write_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
+                else:
+                    self._write_bytes(image_path.read_bytes(), image_content_type(image_path))
             elif parsed.path == "/health":
                 self._write_json({"ok": True})
             elif parsed.path == "/plants/search":
@@ -1917,6 +2144,8 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
                 self._write_json(manager.add_device_payload(params))
             elif parsed.path == "/devices/remove":
                 self._write_json(manager.remove_device_payload(params))
+            elif parsed.path == "/entity/command":
+                self._write_json(manager.entity_command_payload(params))
             elif parsed.path == "/history":
                 self._write_json(
                     manager.history_payload(
@@ -2003,6 +2232,25 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
         self.send_response(int(status))
         self._send_cors_headers()
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _write_text(self, text: str, content_type: str, status: HTTPStatus = HTTPStatus.OK) -> None:
+        self._write_bytes(text.encode("utf-8"), content_type, status)
+
+    def _write_bytes(self, body: bytes, content_type: str, status: HTTPStatus = HTTPStatus.OK) -> None:
+        LOGGER.info(
+            "Ingress static response remote=%s path=%s status=%s bytes=%s",
+            self.client_address[0],
+            urlparse(self.path).path,
+            int(status),
+            len(body),
+        )
+        self.send_response(int(status))
+        self._send_cors_headers()
+        self.send_header("Content-Type", content_type)
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -2268,6 +2516,83 @@ def mqtt_device_unique_id(device: dict[str, Any]) -> str:
     return "".join(char.lower() if char.isalnum() else "_" for char in value).strip("_") or "growcube"
 
 
+def dashboard_entity_states(
+    device_id: str,
+    device: dict[str, Any],
+    entities: dict[str, str],
+    channels: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    states: dict[str, dict[str, Any]] = {}
+
+    def add(entity_id_value: str, state: Any, **attributes: Any) -> None:
+        if not entity_id_value:
+            return
+        if state is None:
+            state = "unknown"
+        elif isinstance(state, bool):
+            state = "on" if state else "off"
+        else:
+            state = str(state)
+        states[entity_id_value] = {"entity_id": entity_id_value, "state": state, "attributes": attributes}
+
+    device_name = device.get("name") or device_id
+    add(entities["temperature"], device.get("temperature"), unit_of_measurement="°C", friendly_name=f"{device_name} Temperature")
+    add(entities["humidity"], device.get("humidity"), unit_of_measurement="%", friendly_name=f"{device_name} Humidity")
+    add(entities["connection_problem"], not bool(device.get("connected")), friendly_name=f"{device_name} Connection problem")
+    add(entities["water_warning"], bool(device.get("water_warning")), friendly_name=f"{device_name} Water warning")
+    add(entities["device_locked"], bool(device.get("device_locked")), friendly_name=f"{device_name} Device locked")
+    add(entities["tank_remaining"], device.get("tank_remaining_ml"), unit_of_measurement="mL")
+    add(entities["tank_level"], device.get("tank_level"), unit_of_measurement="%")
+    add(
+        entities["tank_days_left"],
+        device.get("tank_days_left"),
+        unit_of_measurement="d",
+        daily_usage_ml=device.get("tank_daily_usage_ml"),
+        usable_remaining_ml=device.get("tank_usable_remaining_ml"),
+        unusable_reserve_ml=device.get("tank_unusable_reserve_ml"),
+        forecast=device.get("tank_forecast") or {},
+    )
+    add(entities["tank_capacity"], device.get("tank_capacity_ml"), unit_of_measurement="mL")
+    add(entities["mark_tank_full"], "unknown")
+
+    device_channels = device.get("channels") or []
+    for index, channel_key in enumerate("abcd"):
+        channel = device_channels[index] if index < len(device_channels) and isinstance(device_channels[index], dict) else {}
+        config = channel.get("config") or {}
+        channel_entities = channels[channel_key]
+        add(channel_entities["name"], config.get("plant_name") or "")
+        add(channel_entities["photo_url"], config.get("photo_url") or "")
+        add(channel_entities["plant_configured"], bool(channel.get("plant_configured")))
+        add(channel_entities["moisture"], channel.get("moisture"), unit_of_measurement="%")
+        add(channel_entities["last_watering"], channel.get("last_watering"))
+        add(
+            channel_entities["history_count"],
+            channel.get("history_count") or 0,
+            history_loading=bool(channel.get("history_loading")),
+            history_complete=bool(channel.get("history_complete")),
+            watering_events_complete=bool(channel.get("watering_events_complete")),
+            history_points=channel.get("history_count") or 0,
+            addon_api_url=device.get("addon_api_url") or "",
+            history=channel.get("history") or [],
+            watering_events=channel.get("watering_events") or [],
+        )
+        add(channel_entities["next_watering"], channel.get("next_watering"))
+        add(channel_entities["mode"], config.get("mode") or "Disabled", options=["Disabled", "Repeating", "Smart"])
+        add(channel_entities["first_watering_time"], config.get("first_watering_time") or "08:00:00")
+        add(channel_entities["duration"], config.get("amount_ml") or config.get("duration_seconds") or 50, unit_of_measurement="mL")
+        add(channel_entities["interval"], config.get("interval_hours") or 24, unit_of_measurement="h")
+        add(channel_entities["smart_min_moisture"], config.get("smart_min_moisture") or 20, unit_of_measurement="%")
+        add(channel_entities["smart_max_moisture"], config.get("smart_max_moisture") or 60, unit_of_measurement="%")
+        add(channel_entities["smart_daytime_watering"], bool(config.get("smart_daytime_watering", True)))
+        add(channel_entities["manual_duration"], config.get("manual_duration_seconds") or 50, unit_of_measurement="mL")
+        for key in ("add_plant", "load_history", "save", "reset", "water", "stop"):
+            add(channel_entities[key], "unknown")
+        for key in ("outlet_blocked", "outlet_locked", "sensor_fault", "sensor_disconnected", "watering_issue", "watering_locked"):
+            add(channel_entities[key], bool(channel.get(key)))
+
+    return states
+
+
 def validate_channel_key(value: str) -> int:
     text = str(value).strip().lower()
     if text in "abcd":
@@ -2329,6 +2654,17 @@ def rendered_lovelace_card() -> str:
     else:
         LOGGER.warning("GrowCube ingress URL was not discovered; card will use fallback API paths")
     return source.replace(CARD_API_URL_PLACEHOLDER, api_url)
+
+
+def image_content_type(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".png":
+        return "image/png"
+    if suffix in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if suffix == ".webp":
+        return "image/webp"
+    return "application/octet-stream"
 
 
 def lovelace_card_version(card_source: str) -> str:
