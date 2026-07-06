@@ -5,6 +5,7 @@
 - Remove static GrowCube device setup from the add-on configuration; devices are now managed from the Web UI and stored in add-on data.
 - Publish MQTT Discovery/state explicitly when a device is added from the Web UI so Home Assistant can discover it without an add-on restart.
 - Make Web UI discovery default to one-click local network search while keeping manual network entry behind an optional control.
+- Restrict the ingress API handler to loopback and configured Home Assistant/Supervisor CIDRs instead of allowing all private LAN addresses.
 - Restore the GrowCube title in the Web UI top bar with the settings gear on the same row.
 - Align the standalone device switcher with the Web UI top bar.
 - Place the plant-detail back button in the title row so the plant title shifts right like the Settings page header.

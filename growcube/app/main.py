@@ -59,6 +59,7 @@ CARD_SOURCE_PATH = APP_DIR / "www" / "growcube-card.js"
 CARD_IMAGE_SOURCE_DIR = APP_DIR / "www" / "images"
 CARD_API_URL_PLACEHOLDER = "__GROWCUBE_ADDON_API_URL__"
 DEFAULT_INGRESS_PORT = 8099
+DEFAULT_INGRESS_ALLOWED_CIDRS = ("127.0.0.0/8", "::1/128", "172.30.0.0/16")
 CLOUD_CATALOG_HOSTS = ("https://api.growcube.cc", "http://api.growcube.cc")
 CLOUD_CATALOG_LIMIT = 40
 CLOUD_CATALOG_TIMEOUT_SECONDS = 45
@@ -2209,6 +2210,18 @@ setInterval(() => refreshDashboard(true).catch(() => {}), 5000);
 """
 
 
+def ingress_allowed_networks() -> list[ipaddress._BaseNetwork]:
+    raw_value = os.environ.get("GROWCUBE_INGRESS_ALLOWED_CIDRS", "")
+    values = [item.strip() for item in raw_value.split(",") if item.strip()] or list(DEFAULT_INGRESS_ALLOWED_CIDRS)
+    networks: list[ipaddress._BaseNetwork] = []
+    for value in values:
+        try:
+            networks.append(ipaddress.ip_network(value, strict=False))
+        except ValueError:
+            LOGGER.warning("Ignoring invalid ingress allowed CIDR %r", value)
+    return networks
+
+
 class GrowCubeApiHandler(BaseHTTPRequestHandler):
     server_version = "GrowCubeAddon/0.2"
 
@@ -2303,14 +2316,11 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
         LOGGER.debug("Ingress API: " + format, *args)
 
     def _allow_request(self) -> bool:
-        host = self.client_address[0]
-        if host in {"127.0.0.1", "::1", "172.30.32.2"} or host.startswith("172.30."):
-            return True
         try:
-            address = ipaddress.ip_address(host)
+            address = ipaddress.ip_address(self.client_address[0])
         except ValueError:
             return False
-        return address.is_private or address.is_loopback
+        return any(address in network for network in ingress_allowed_networks())
 
     def _send_cors_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
