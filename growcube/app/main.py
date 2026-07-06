@@ -1799,13 +1799,10 @@ def web_ui_html() -> str:
       justify-content: center;
       vertical-align: middle;
     }
-    ha-icon::before {
-      content: "";
-      width: 1em;
-      height: 1em;
-      border-radius: 50%;
-      border: 2px solid currentColor;
-      opacity: .55;
+    ha-icon svg {
+      display: block;
+      width: 100%;
+      height: 100%;
     }
     @media (max-width: 640px) {
       main { padding: 16px; }
@@ -1858,18 +1855,59 @@ def web_ui_html() -> str:
     </section>
   </div>
 </main>
+<script>
+window.GROWCUBE_STANDALONE_WEBUI = true;
+if (!customElements.get("ha-card")) customElements.define("ha-card", class extends HTMLElement {});
+if (!customElements.get("ha-icon")) {
+  customElements.define("ha-icon", class extends HTMLElement {
+    static get observedAttributes() { return ["icon"]; }
+    connectedCallback() { this.render(); }
+    attributeChangedCallback() { this.render(); }
+    render() {
+      const icon = String(this.getAttribute("icon") || "");
+      this.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">${iconSvg(icon)}</svg>`;
+    }
+  });
+}
+</script>
 <script src="growcube-card.js"></script>
 <script>
-if (!customElements.get("ha-card")) customElements.define("ha-card", class extends HTMLElement {});
-if (!customElements.get("ha-icon")) customElements.define("ha-icon", class extends HTMLElement {});
 
 const devicesEl = document.getElementById("devices");
 const resultsEl = document.getElementById("discoverResults");
 const statusEl = document.getElementById("discoverStatus");
 const dashboardCard = document.getElementById("growcubeDashboard");
-const basePath = window.location.pathname.replace(/\/$/, "") || "/";
+const basePath = window.location.pathname.endsWith("/") ? (window.location.pathname.slice(0, -1) || "/") : window.location.pathname;
 const addonApiUrl = `${window.location.origin}${basePath === "/" ? "" : basePath}`;
 let dashboardPayload = {devices: []};
+
+function iconSvg(icon) {
+  const common = 'fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"';
+  const filled = 'fill="currentColor"';
+  const icons = {
+    "mdi:refresh": `<path ${common} d="M20 6v5h-5"/><path ${common} d="M19 11a7 7 0 1 0-2.1 5"/>`,
+    "mdi:dots-vertical": `<circle ${filled} cx="12" cy="5" r="1.8"/><circle ${filled} cx="12" cy="12" r="1.8"/><circle ${filled} cx="12" cy="19" r="1.8"/>`,
+    "mdi:chevron-up": `<path ${common} d="m6 15 6-6 6 6"/>`,
+    "mdi:chevron-down": `<path ${common} d="m6 9 6 6 6-6"/>`,
+    "mdi:chevron-right": `<path ${common} d="m9 6 6 6-6 6"/>`,
+    "mdi:arrow-left": `<path ${common} d="M19 12H5"/><path ${common} d="m12 5-7 7 7 7"/>`,
+    "mdi:check": `<path ${common} d="m5 12 4 4 10-10"/>`,
+    "mdi:close": `<path ${common} d="M6 6l12 12M18 6 6 18"/>`,
+    "mdi:information-outline": `<circle ${common} cx="12" cy="12" r="9"/><path ${common} d="M12 10v6"/><circle ${filled} cx="12" cy="7" r="1"/>`,
+    "mdi:delete-outline": `<path ${common} d="M6 7h12M10 7V5h4v2M8 7l1 12h6l1-12"/>`,
+    "mdi:alert-circle": `<circle ${common} cx="12" cy="12" r="9"/><path ${common} d="M12 7v6"/><circle ${filled} cx="12" cy="17" r="1"/>`,
+    "mdi:alert": `<path ${common} d="M12 4 3 20h18L12 4Z"/><path ${common} d="M12 9v5"/><circle ${filled} cx="12" cy="17" r="1"/>`,
+    "mdi:cube-outline": `<path ${common} d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z"/><path ${common} d="M4 7.5 12 12l8-4.5M12 12v9"/>`,
+    "mdi:sprout": `<path ${common} d="M12 20V9"/><path ${common} d="M12 10C8 5 4 6 3 11c5 1 8-1 9-1Z"/><path ${common} d="M12 12c2-5 7-6 9-2-4 3-7 3-9 2Z"/>`,
+    "mdi:flower": `<circle ${common} cx="12" cy="12" r="2.2"/><circle ${common} cx="12" cy="5" r="2.5"/><circle ${common} cx="12" cy="19" r="2.5"/><circle ${common} cx="5" cy="12" r="2.5"/><circle ${common} cx="19" cy="12" r="2.5"/>`,
+    "mdi:pot-mix-outline": `<path ${common} d="M7 10h10l-1 9H8l-1-9Z"/><path ${common} d="M6 10h12M10 10c-1-4-4-4-5-2M14 10c1-5 5-5 6-2"/>`,
+    "mdi:water-pump": `<path ${common} d="M5 19h14M7 19V9h8v10M9 9V6h4v3M15 12h3v4"/><path ${common} d="M19 16c1.5 1.6 1.5 3 0 4-1.5-1-1.5-2.4 0-4Z"/>`,
+    "mdi:message-alert-outline": `<path ${common} d="M5 5h14v10H9l-4 4V5Z"/><path ${common} d="M12 7v4"/><circle ${filled} cx="12" cy="13" r="1"/>`,
+    "mdi:chart-bell-curve": `<path ${common} d="M4 18h16"/><path ${common} d="M5 17c3 0 3-10 7-10s4 10 7 10"/>`,
+    "mdi:checkbox-blank-circle-outline": `<circle ${common} cx="12" cy="12" r="7"/>`,
+  };
+  return icons[icon] || `<circle ${common} cx="12" cy="12" r="8"/><path ${common} d="M12 8v4l3 3"/>`;
+}
 
 dashboardCard._defaultNavigationPath = function(channel = undefined, deviceId = "") {
   const params = new URLSearchParams(window.location.search || "");

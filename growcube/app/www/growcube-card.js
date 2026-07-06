@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.51-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.52-addon-compat";
 const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
@@ -4028,11 +4028,17 @@ class GrowcubeCard extends HTMLElement {
       ? (data.smartDaytimeWatering ? "On" : "Off")
       : `${data.scheduleDuration} mL / ${Math.max(1, Math.round(data.interval / 24))}d`;
     const photoUrl = this._currentPlantPhotoUrl();
+    const standaloneBack = window.GROWCUBE_STANDALONE_WEBUI ? `
+      <button type="button" class="icon-button" data-action="webui-back" aria-label="Back to dashboard">
+        <ha-icon icon="mdi:arrow-left"></ha-icon>
+      </button>
+    ` : "";
     return `
       <div class="card detail detail-flat">
         <div class="plant-dashboard">
           <div class="plant-main plant-section">
             <div class="plant-titlebar">
+              ${standaloneBack}
               <div class="plant-photo">
                 ${photoUrl ? `<img src="${this._escape(photoUrl)}" alt="" referrerpolicy="no-referrer">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
               </div>
@@ -5685,6 +5691,11 @@ class GrowcubeCard extends HTMLElement {
           event.stopPropagation();
           this._detailMenuOpen = !this._detailMenuOpen;
           this._render();
+        } else if (action === "webui-back") {
+          event.stopPropagation();
+          const path = this._detailBackPath();
+          window.history.pushState(null, "", path);
+          window.dispatchEvent(new CustomEvent("location-changed"));
         } else if (action === "open-about") {
           event.stopPropagation();
           this._detailMenuOpen = false;

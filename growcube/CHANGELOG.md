@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.52
+
+- Add standalone Web UI icon rendering for the GrowCube card inside Home Assistant ingress.
+- Add a Web UI-only back button on plant detail pages.
+
 ## 0.2.51
 
 - Make the add-on Web UI open the full GrowCube dashboard by default using the existing Lovelace card implementation.
