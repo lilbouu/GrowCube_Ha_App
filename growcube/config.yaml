@@ -22,16 +22,11 @@ host_network: true
 services:
   - mqtt:need
 options:
-  devices: []
   mqtt_host: core-mosquitto
   mqtt_port: 1883
   mqtt_username: ""
   mqtt_password: ""
 schema:
-  devices:
-    - name: str
-      host: str
-      port: "int?"
   mqtt_host: str
   mqtt_port: int
   mqtt_username: str?

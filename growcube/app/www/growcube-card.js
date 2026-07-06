@@ -2381,6 +2381,11 @@ class GrowcubeCard extends HTMLElement {
           grid-template-columns: auto 1fr auto;
           gap: 14px;
           align-items: center;
+          min-width: 0;
+        }
+
+        .header > :nth-child(2) {
+          min-width: 0;
         }
 
         .dashboard-card {
@@ -2542,12 +2547,14 @@ class GrowcubeCard extends HTMLElement {
           line-height: 1.2;
           font-weight: 650;
           color: var(--primary-text-color);
+          overflow-wrap: anywhere;
         }
 
         .subtitle {
           margin-top: 4px;
           font-size: 14px;
           color: var(--secondary-text-color);
+          overflow-wrap: anywhere;
         }
 
         .stats {
@@ -3108,7 +3115,8 @@ class GrowcubeCard extends HTMLElement {
         }
 
         .plant-actions {
-          align-content: start;
+          align-self: stretch;
+          align-content: end;
         }
 
         .plant-main .stats {
@@ -3118,6 +3126,7 @@ class GrowcubeCard extends HTMLElement {
         @media (min-width: 700px) {
           .plant-dashboard {
             grid-template-columns: minmax(0, 1fr) minmax(360px, 430px);
+            grid-template-rows: minmax(0, 1fr) auto;
             grid-template-areas:
               "chart controls"
               "chart actions";
@@ -3167,6 +3176,11 @@ class GrowcubeCard extends HTMLElement {
             right: 18px;
           }
 
+          .dashboard-card.webui-standalone .dashboard-toolbar {
+            top: -50px;
+            right: 54px;
+          }
+
           .device-pill {
             max-width: min(260px, calc(100vw - 48px));
           }
@@ -3185,6 +3199,10 @@ class GrowcubeCard extends HTMLElement {
           .quick-actions,
           .chart-header {
             grid-template-columns: 1fr;
+          }
+
+          .plant-actions {
+            align-content: start;
           }
 
           .chart-header-meta {
@@ -3816,13 +3834,16 @@ class GrowcubeCard extends HTMLElement {
     const device = this._deviceRecord();
     const plants = device ? this._configuredChannelsForDevice(device) : [];
     const hasFreeChannel = plants.length < this._channels().length;
+    const plantCountText = plants.length
+      ? `${plants.length} active plant${plants.length === 1 ? "" : "s"}`
+      : "No plants added yet";
     return `
       <div class="card">
         <div class="header">
           <div class="plant-icon"><ha-icon icon="mdi:sprout"></ha-icon></div>
           <div>
             <div class="title">Plants</div>
-            <div class="subtitle">${this._escape(device?.name || "GrowCube")} · ${plants.length ? `${plants.length} active plant${plants.length === 1 ? "" : "s"}` : "No plants added yet"}</div>
+            <div class="subtitle">${this._escape(plantCountText)}</div>
           </div>
         </div>
         ${

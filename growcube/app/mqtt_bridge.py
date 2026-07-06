@@ -93,6 +93,7 @@ class MqttBridge:
         self.on_command = on_command
         self.client: MqttClient | None = None
         self._published_discovery: set[str] = set()
+        self._pending_devices: dict[str, dict] = {}
 
     async def run_forever(self, snapshot_provider) -> None:
         while True:
@@ -102,6 +103,9 @@ class MqttBridge:
                 await client.subscribe("growcube/+/+/set")
                 self.client = client
                 await self.publish_all(snapshot_provider())
+                if self._pending_devices:
+                    LOGGER.info("Clearing %s queued MQTT device publish(es) after full publish", len(self._pending_devices))
+                    self._pending_devices.clear()
                 LOGGER.info("Connected to MQTT at %s:%s", self.options.host, self.options.port)
                 await self._read_loop()
             except asyncio.CancelledError:
@@ -113,9 +117,10 @@ class MqttBridge:
             await asyncio.sleep(10)
 
     async def _read_loop(self) -> None:
-        assert self.client is not None
+        client = self.client
+        assert client is not None
         while True:
-            packet_type, body = await self.client.read_packet()
+            packet_type, body = await client.read_packet()
             if packet_type == 0x30:
                 topic, payload = _decode_publish(body)
                 parts = topic.split("/")
@@ -130,15 +135,33 @@ class MqttBridge:
         for device in devices:
             await self.publish_device(device)
 
-    async def publish_device(self, device: dict) -> None:
-        if self.client is None:
-            return
+    async def publish_device(self, device: dict, raise_on_error: bool = True) -> None:
         unique_id = _device_unique_id(device)
-        if unique_id not in self._published_discovery:
-            LOGGER.info("Publishing MQTT Discovery configs for GrowCube device %s", unique_id)
-            await self._publish_discovery(device, unique_id)
-            self._published_discovery.add(unique_id)
-        await self._publish_state(device, unique_id)
+        if self.client is None:
+            self._queue_device(device, unique_id, "until MQTT reconnects")
+            return
+        try:
+            if unique_id not in self._published_discovery:
+                LOGGER.info("Publishing MQTT Discovery configs for GrowCube device %s", unique_id)
+                await self._publish_discovery(device, unique_id)
+                self._published_discovery.add(unique_id)
+            await self._publish_state(device, unique_id)
+            self._pending_devices.pop(unique_id, None)
+        except Exception as err:
+            self._queue_device(device, unique_id, f"after publish failure: {err}")
+            self._drop_client()
+            if raise_on_error:
+                raise
+
+    def _queue_device(self, device: dict, unique_id: str, reason: str) -> None:
+        self._pending_devices[unique_id] = dict(device)
+        LOGGER.info("Queued MQTT Discovery publish for GrowCube device %s %s", unique_id, reason)
+
+    def _drop_client(self) -> None:
+        client = self.client
+        self.client = None
+        if client is not None and client.writer is not None:
+            client.writer.close()
 
     async def _publish_discovery(self, device: dict, unique_id: str) -> None:
         assert self.client is not None

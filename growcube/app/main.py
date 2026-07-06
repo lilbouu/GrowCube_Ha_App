@@ -240,16 +240,10 @@ class GrowCubeManager:
     def load(self) -> None:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         stored = self._read_json(STATE_PATH, {})
-        options = self._read_json(OPTIONS_PATH, {})
 
         stored_devices: list[dict[str, Any]] = []
         if isinstance(stored.get("devices"), list):
             stored_devices.extend(item for item in stored["devices"] if isinstance(item, dict))
-        option_devices: list[dict[str, Any]] = []
-        if isinstance(options.get("devices"), list):
-            for item in options["devices"]:
-                if isinstance(item, dict):
-                    option_devices.append(item)
 
         with self.lock:
             self.devices = {}
@@ -258,20 +252,9 @@ class GrowCubeManager:
                 state = self._state_from_dict(item)
                 if state.host:
                     devices_by_host[state.host.strip().lower()] = state
-            for item in option_devices:
-                option_state = self._state_from_dict(item)
-                if not option_state.host:
-                    continue
-                host_key = option_state.host.strip().lower()
-                existing = devices_by_host.get(host_key)
-                if existing is None:
-                    devices_by_host[host_key] = option_state
-                    continue
-                existing.name = option_state.name or existing.name
-                existing.port = option_state.port or existing.port
 
             self.devices = {state.id: state for state in devices_by_host.values()}
-            LOGGER.info("Loaded %s GrowCube device(s) from add-on configuration", len(self.devices))
+            LOGGER.info("Loaded %s GrowCube device(s) from add-on data", len(self.devices))
 
     def start_loop(self) -> None:
         self.loop = asyncio.new_event_loop()
@@ -488,9 +471,10 @@ class GrowCubeManager:
                     existing.name = name.strip() or existing.name or host
                     existing.port = max(1, min(65535, int(port or 8800)))
                     existing_id = device_id
-                    self.save_locked()
+                    self.touch_locked(existing)
                     break
         if existing_id is not None:
+            await self.publish_device_to_mqtt(self.devices[existing_id])
             await self.connect(existing_id)
             return self._state_to_dict(self.devices[existing_id])
         state = DeviceState(
@@ -501,7 +485,8 @@ class GrowCubeManager:
         )
         async with self.async_lock:
             self.devices[state.id] = state
-            self.save_locked()
+            self.touch_locked(state)
+        await self.publish_device_to_mqtt(state)
         await self.connect(state.id)
         return self._state_to_dict(state)
 
@@ -1264,8 +1249,14 @@ class GrowCubeManager:
         bridge = self.mqtt_bridge
         if bridge is not None and self.loop is not None:
             snapshot = self._state_to_dict(state)
-            self.schedule_loop_task(bridge.publish_device(snapshot))
+            self.schedule_loop_task(bridge.publish_device(snapshot, raise_on_error=False))
             self.schedule_loop_task(self.sync_notifications(snapshot))
+
+    async def publish_device_to_mqtt(self, state: DeviceState) -> None:
+        bridge = self.mqtt_bridge
+        if bridge is None:
+            return
+        await bridge.publish_device(self._state_to_dict(state), raise_on_error=False)
 
     def schedule_loop_task(self, coro) -> None:
         if self.loop is None:
@@ -1740,7 +1731,7 @@ def web_ui_html() -> str:
       padding: 0;
     }
     .icon-control svg { width: 22px; height: 22px; }
-    .settings-header { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+    .settings-header { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; }
     .settings-header h1 { font-size: 20px; }
     section {
       background: var(--panel);
@@ -1772,6 +1763,25 @@ def web_ui_html() -> str:
     button.secondary { background: transparent; color: var(--accent); }
     button.danger { border-color: var(--bad); background: transparent; color: var(--bad); }
     button:disabled { cursor: wait; opacity: .65; }
+    .section-header {
+      justify-content: space-between;
+      margin-bottom: 14px;
+    }
+    .section-header h2 { margin: 0; }
+    section > .row + p { margin-top: 8px; }
+    .discover-actions {
+      align-items: stretch;
+    }
+    .discover-actions button {
+      min-width: 132px;
+    }
+    .network-row {
+      margin-top: 10px;
+    }
+    #discoverStatus:not(:empty),
+    #discoverResults:not(:empty) {
+      margin-top: 12px;
+    }
     .list { display: grid; gap: 10px; }
     .item {
       display: grid;
@@ -1782,6 +1792,7 @@ def web_ui_html() -> str:
       border-radius: 8px;
       padding: 12px;
     }
+    .item > button { justify-self: end; }
     .title { font-weight: 650; overflow-wrap: anywhere; }
     .meta { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
     .status {
@@ -1823,7 +1834,8 @@ def web_ui_html() -> str:
       main { padding: 16px; }
       .topbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; padding: 0; }
       .item { grid-template-columns: 1fr; display: grid; }
-      .item button:not(.icon-control) { width: 100%; }
+      .item button:not(.icon-control) { width: 100%; justify-self: stretch; }
+      .discover-actions button { flex: 1 1 100%; }
     }
   </style>
 </head>
@@ -1863,7 +1875,7 @@ def web_ui_html() -> str:
     </div>
 
     <section>
-      <div class="row" style="justify-content: space-between;">
+      <div class="row section-header">
         <h2>Devices</h2>
         <button class="secondary" id="refreshBtn">Refresh</button>
       </div>
@@ -1872,11 +1884,13 @@ def web_ui_html() -> str:
 
     <section>
       <h2>Discover</h2>
-      <div class="row">
-        <input id="networkInput" placeholder="Network, for example 192.168.1.0/24">
+      <div class="row discover-actions">
         <button id="discoverBtn">Search network</button>
+        <button class="secondary" id="networkOptionsBtn" type="button" aria-expanded="false" aria-controls="networkOptionsRow">Network</button>
       </div>
-      <p>Leave the network empty to scan the local /24 network detected by the add-on.</p>
+      <div class="row network-row hidden" id="networkOptionsRow">
+        <input id="networkInput" placeholder="Network, for example 192.168.1.0/24">
+      </div>
       <div id="discoverStatus" class="meta"></div>
       <div id="discoverResults" class="list"></div>
     </section>
@@ -2140,6 +2154,12 @@ async function discoverDevices() {
 
 document.getElementById("refreshBtn").addEventListener("click", refreshDevices);
 document.getElementById("discoverBtn").addEventListener("click", discoverDevices);
+document.getElementById("networkOptionsBtn").addEventListener("click", () => {
+  const row = document.getElementById("networkOptionsRow");
+  const hidden = row.classList.toggle("hidden");
+  document.getElementById("networkOptionsBtn").setAttribute("aria-expanded", hidden ? "false" : "true");
+  if (!hidden) document.getElementById("networkInput").focus();
+});
 document.getElementById("settingsBtn").addEventListener("click", () => setActiveView("settings"));
 document.getElementById("plantBackBtn").addEventListener("click", () => {
   const params = new URLSearchParams(window.location.search || "");
