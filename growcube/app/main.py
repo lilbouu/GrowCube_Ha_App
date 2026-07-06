@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import gzip
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -57,6 +59,7 @@ OPTIONS_PATH = DATA_DIR / "options.json"
 APP_DIR = Path(__file__).parent
 CARD_SOURCE_PATH = APP_DIR / "www" / "growcube-card.js"
 CARD_IMAGE_SOURCE_DIR = APP_DIR / "www" / "images"
+PLANT_PHOTO_DIR = DATA_DIR / "plant_photos"
 CARD_API_URL_PLACEHOLDER = "__GROWCUBE_ADDON_API_URL__"
 DEFAULT_INGRESS_PORT = 8099
 DEFAULT_INGRESS_ALLOWED_CIDRS = ("127.0.0.0/8", "::1/128", "172.30.0.0/16")
@@ -2254,6 +2257,13 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
                     self._write_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
                 else:
                     self._write_bytes(image_path.read_bytes(), image_content_type(image_path))
+            elif parsed.path.startswith("/plant_photos/"):
+                image_name = Path(parsed.path).name
+                image_path = PLANT_PHOTO_DIR / image_name
+                if not image_path.is_file():
+                    self._write_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
+                else:
+                    self._write_bytes(image_path.read_bytes(), image_content_type(image_path))
             elif parsed.path == "/health":
                 self._write_json({"ok": True})
             elif parsed.path == "/plants/search":
@@ -2309,6 +2319,30 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
             LOGGER.exception("GrowCube ingress API request failed: %s", self.path)
             self._write_json({"error": str(err)}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        LOGGER.info(
+            "Ingress API POST request remote=%s path=%s query=%r",
+            self.client_address[0],
+            parsed.path,
+            parsed.query,
+        )
+        if not self._allow_request():
+            LOGGER.warning("Ingress API forbidden remote=%s path=%s", self.client_address[0], parsed.path)
+            self._write_json({"error": "forbidden"}, HTTPStatus.FORBIDDEN)
+            return
+        try:
+            if parsed.path == "/plants/photo":
+                payload = self._read_json_body(2 * 1024 * 1024)
+                self._write_json(save_uploaded_plant_photo(payload))
+            else:
+                self._write_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
+        except ValueError as err:
+            self._write_json({"error": str(err)}, HTTPStatus.BAD_REQUEST)
+        except Exception as err:
+            LOGGER.exception("GrowCube ingress API POST failed: %s", self.path)
+            self._write_json({"error": str(err)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+
     def do_OPTIONS(self) -> None:
         self.send_response(HTTPStatus.NO_CONTENT)
         self._send_cors_headers()
@@ -2327,8 +2361,22 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
 
     def _send_cors_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Accept, Content-Type")
+
+    def _read_json_body(self, max_bytes: int) -> dict[str, Any]:
+        length = optional_int(self.headers.get("Content-Length")) or 0
+        if length <= 0:
+            raise ValueError("empty request body")
+        if length > max_bytes:
+            raise ValueError("request body too large")
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        except json.JSONDecodeError as err:
+            raise ValueError("invalid json body") from err
+        if not isinstance(payload, dict):
+            raise ValueError("json body must be an object")
+        return payload
 
     def _write_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -2860,6 +2908,39 @@ def fetch_remote_image(url_value: str) -> tuple[bytes, str]:
         if not content_type.startswith("image/"):
             raise ValueError("remote url is not an image")
         return response.read(), content_type
+
+
+def save_uploaded_plant_photo(payload: dict[str, Any]) -> dict[str, Any]:
+    content_type = str(payload.get("content_type") or "").split(";", 1)[0].strip().lower()
+    extension_by_type = {
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+    }
+    suffix = extension_by_type.get(content_type)
+    if suffix is None:
+        raise ValueError("photo must be JPEG, PNG, or WebP")
+    raw_data = str(payload.get("data") or "")
+    if "," in raw_data and raw_data.lower().startswith("data:"):
+        raw_data = raw_data.split(",", 1)[1]
+    try:
+        body = base64.b64decode(raw_data, validate=True)
+    except (ValueError, binascii.Error) as err:
+        raise ValueError("invalid photo data") from err
+    if not body:
+        raise ValueError("empty photo")
+    if len(body) > 1024 * 1024:
+        raise ValueError("photo must be 1 MB or smaller")
+    PLANT_PHOTO_DIR.mkdir(parents=True, exist_ok=True)
+    photo_name = f"{uuid.uuid4().hex}{suffix}"
+    photo_path = PLANT_PHOTO_DIR / photo_name
+    photo_path.write_bytes(body)
+    LOGGER.info("Saved uploaded plant photo path=%s bytes=%s content_type=%s", photo_path, len(body), content_type)
+    return {
+        "url": f"/plant_photos/{photo_name}",
+        "content_type": content_type,
+        "bytes": len(body),
+    }
 
 
 def lovelace_card_version(card_source: str) -> str:

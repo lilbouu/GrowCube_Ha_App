@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.63-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.64-addon-compat";
 const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
@@ -43,6 +43,8 @@ class GrowcubeCard extends HTMLElement {
     this._plantWizardTempMax = 0;
     this._plantWizardAirHumidityMin = 0;
     this._plantWizardAirHumidityMax = 0;
+    this._plantWizardPhotoUploading = false;
+    this._plantWizardPhotoFileName = "";
     this._plantWizardSearch = "";
     this._plantWizardResults = [];
     this._plantWizardResultPage = 0;
@@ -264,6 +266,33 @@ class GrowcubeCard extends HTMLElement {
       throw new Error(`GrowCube add-on API returned non-JSON: ${url}: ${body.slice(0, 240)}`);
     }
     console.info("[GrowCube] add-on API response", { url, elapsedMs: Math.round(performance.now() - started), keys: Object.keys(result || {}) });
+    return result;
+  }
+
+  async _postAddonApi(path, payload = {}) {
+    const baseUrl = await this._addonApiUrl();
+    if (!baseUrl) {
+      throw new Error("Add-on API URL is unavailable");
+    }
+    const cleanPath = String(path).replace(/^\/+/, "");
+    const url = `${baseUrl}/${cleanPath}`;
+    const started = performance.now();
+    const response = await fetch(url, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`GrowCube add-on API failed: ${response.status} ${response.statusText}: ${body.slice(0, 240)}`);
+    }
+    const body = await response.text();
+    const result = body ? JSON.parse(body) : {};
+    console.info("[GrowCube] add-on API POST response", { url, elapsedMs: Math.round(performance.now() - started), keys: Object.keys(result || {}) });
     return result;
   }
 
@@ -1485,6 +1514,8 @@ class GrowcubeCard extends HTMLElement {
     this._plantWizardTempMax = 0;
     this._plantWizardAirHumidityMin = 0;
     this._plantWizardAirHumidityMax = 0;
+    this._plantWizardPhotoUploading = false;
+    this._plantWizardPhotoFileName = "";
     this._plantWizardSearch = "";
     this._plantWizardResults = [];
     this._plantWizardResultPage = 0;
@@ -1502,10 +1533,10 @@ class GrowcubeCard extends HTMLElement {
   }
 
   _setPlantWizardStep(step) {
-    if (Number(step) >= 2 && !this._availablePlantWizardChannels().includes(this._plantWizardChannel)) {
+    if (Number(step) >= 3 && !this._availablePlantWizardChannels().includes(this._plantWizardChannel)) {
       this._plantWizardChannel = this._firstAvailableChannel();
     }
-    this._plantWizardStep = this._clamp(Number(step), 0, 5);
+    this._plantWizardStep = this._clamp(Number(step), 0, 6);
     this._render();
   }
 
@@ -1516,10 +1547,10 @@ class GrowcubeCard extends HTMLElement {
     if (this._plantWizardStep === 1) {
       return Boolean(this._plantWizardSelected) && this._plantWizardName.trim().length > 0;
     }
-    if (this._plantWizardStep === 2) {
+    if (this._plantWizardStep === 3) {
       return this._availablePlantWizardChannels().includes(this._plantWizardChannel);
     }
-    if (this._plantWizardStep === 3) {
+    if (this._plantWizardStep === 4) {
       return this._plantWizardMode === "Smart" || this._plantWizardMode === "Repeating";
     }
     return true;
@@ -1851,6 +1882,7 @@ class GrowcubeCard extends HTMLElement {
     this._plantWizardCustom = true;
     this._plantWizardName = name;
     this._plantWizardPhotoUrl = "";
+    this._plantWizardPhotoFileName = "";
     this._plantWizardCategory = "Custom plant";
     this._plantWizardDescription = "";
     this._plantWizardTempMin = 0;
@@ -1862,6 +1894,50 @@ class GrowcubeCard extends HTMLElement {
     this._plantWizardSmartMax = 60;
     this._plantWizardStep = 1;
     this._render();
+  }
+
+  async _uploadPlantWizardPhoto(file) {
+    if (!file) {
+      return;
+    }
+    if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+      this._showError("Photo must be JPEG, PNG, or WebP");
+      return;
+    }
+    if (file.size > 1024 * 1024) {
+      this._showError("Photo must be 1 MB or smaller");
+      return;
+    }
+    this._plantWizardPhotoUploading = true;
+    this._plantWizardPhotoFileName = file.name || "plant photo";
+    this._render();
+    try {
+      const dataUrl = await this._readFileAsDataUrl(file);
+      const result = await this._postAddonApi("plants/photo", {
+        filename: file.name || "plant-photo",
+        content_type: file.type,
+        data: String(dataUrl).split(",", 2)[1] || "",
+      });
+      const baseUrl = await this._addonApiUrl();
+      const url = String(result?.url || "");
+      this._plantWizardPhotoUrl = url.startsWith("/") ? `${baseUrl}${url}` : url;
+      this._plantWizardPhotoUploading = false;
+      this._showToast("Photo uploaded");
+      this._render();
+    } catch (error) {
+      this._plantWizardPhotoUploading = false;
+      this._showError(error?.message || "Photo upload failed");
+      this._render();
+    }
+  }
+
+  _readFileAsDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.addEventListener("load", () => resolve(reader.result || ""));
+      reader.addEventListener("error", () => reject(reader.error || new Error("Could not read photo")));
+      reader.readAsDataURL(file);
+    });
   }
 
   _changePlantWizardResultPage(delta) {
@@ -1953,6 +2029,9 @@ class GrowcubeCard extends HTMLElement {
       return `https://${text.slice("http://".length)}`;
     }
     if (/^https:\/\//i.test(text)) {
+      return text;
+    }
+    if (text.startsWith("/api/hassio_ingress/") || text.startsWith("/plant_photos/")) {
       return text;
     }
     if (text.startsWith("/")) {
@@ -3494,9 +3573,40 @@ class GrowcubeCard extends HTMLElement {
           margin-top: 16px;
         }
 
+        .custom-plant-card {
+          width: 100%;
+          display: grid;
+          grid-template-columns: 44px minmax(0, 1fr);
+          gap: 12px;
+          align-items: center;
+          padding: 14px;
+          border: 1px solid var(--divider-color);
+          border-radius: 8px;
+          background: color-mix(in srgb, var(--primary-text-color) 5%, transparent);
+          color: var(--primary-text-color);
+          text-align: left;
+        }
+
+        .custom-plant-card .subtitle {
+          margin-top: 3px;
+          color: var(--secondary-text-color);
+          font-size: 13px;
+          line-height: 1.35;
+        }
+
+        .custom-plant-icon {
+          width: 44px;
+          height: 44px;
+          display: grid;
+          place-items: center;
+          border-radius: 8px;
+          background: color-mix(in srgb, var(--primary-color) 14%, transparent);
+          color: var(--primary-color);
+        }
+
         .wizard-progress {
           display: grid;
-          grid-template-columns: repeat(6, 1fr);
+          grid-template-columns: repeat(7, 1fr);
           gap: 6px;
           margin: 14px 0 16px;
         }
@@ -4968,28 +5078,29 @@ class GrowcubeCard extends HTMLElement {
   }
 
   _plantWizardDialogTemplate() {
-    const titles = ["Find plant", "Plant details", "Choose channel", "Watering mode", "Watering settings", "Review"];
+    const titles = ["Find plant", "Name and photo", "Growing conditions", "Choose channel", "Watering mode", "Watering settings", "Review"];
     return `
       <div class="dialog-backdrop" data-action="close-plant-wizard">
         <div class="dialog" role="dialog" aria-modal="true" aria-label="Add plant">
           <div class="dialog-title">${titles[this._plantWizardStep] || "Add plant"}</div>
           <div class="wizard-progress">
-            ${[0, 1, 2, 3, 4, 5].map((step) => `<div class="wizard-dot ${step <= this._plantWizardStep ? "active" : ""}"></div>`).join("")}
+            ${[0, 1, 2, 3, 4, 5, 6].map((step) => `<div class="wizard-dot ${step <= this._plantWizardStep ? "active" : ""}"></div>`).join("")}
           </div>
           <div class="wizard-step">
             ${this._plantWizardStep === 0 ? this._plantWizardSearchStep() : ""}
             ${this._plantWizardStep === 1 ? this._plantWizardDetailsStep() : ""}
-            ${this._plantWizardStep === 2 ? this._plantWizardChannelStep() : ""}
-            ${this._plantWizardStep === 3 ? this._plantWizardWateringModeStep() : ""}
-            ${this._plantWizardStep === 4 ? this._plantWizardWateringSettingsStep() : ""}
-            ${this._plantWizardStep === 5 ? this._plantWizardReviewStep() : ""}
+            ${this._plantWizardStep === 2 ? this._plantWizardConditionsStep() : ""}
+            ${this._plantWizardStep === 3 ? this._plantWizardChannelStep() : ""}
+            ${this._plantWizardStep === 4 ? this._plantWizardWateringModeStep() : ""}
+            ${this._plantWizardStep === 5 ? this._plantWizardWateringSettingsStep() : ""}
+            ${this._plantWizardStep === 6 ? this._plantWizardReviewStep() : ""}
           </div>
           <div class="dialog-actions">
             <button type="button" class="secondary" data-action="${this._plantWizardStep === 0 ? "close-plant-wizard-button" : "plant-wizard-back"}">
               ${this._plantWizardStep === 0 ? "Cancel" : "Back"}
             </button>
-            <button type="button" data-action="${this._plantWizardStep === 5 ? "confirm-add-plant" : "plant-wizard-next"}" ${this._canAdvancePlantWizard() ? "" : "disabled"}>
-              ${this._plantWizardStep === 5 ? "Add plant" : "Next"}
+            <button type="button" data-action="${this._plantWizardStep === 6 ? "confirm-add-plant" : "plant-wizard-next"}" ${this._canAdvancePlantWizard() ? "" : "disabled"}>
+              ${this._plantWizardStep === 6 ? "Add plant" : "Next"}
             </button>
           </div>
         </div>
@@ -5097,7 +5208,13 @@ class GrowcubeCard extends HTMLElement {
           <button type="button" data-action="search-plant-catalog">Search</button>
         </div>
       </label>
-      <button type="button" class="secondary" data-action="plant-wizard-custom">Create custom plant</button>
+      <button type="button" class="custom-plant-card" data-action="plant-wizard-custom">
+        <div class="custom-plant-icon"><ha-icon icon="mdi:plus"></ha-icon></div>
+        <div>
+          <div class="title">Create custom plant</div>
+          <div class="subtitle">Set your own name, photo, plant conditions, and watering rules.</div>
+        </div>
+      </button>
       ${
         this._plantWizardLoading
           ? '<div class="label">Loading plant catalog...</div>'
@@ -5121,7 +5238,6 @@ class GrowcubeCard extends HTMLElement {
   _plantWizardDetailsStep() {
     const item = this._plantWizardSelected || {};
     const name = item.display_name || item.name || this._plantWizardName || "Unknown plant";
-    const about = this._plantWizardDescription || item.description || "";
     const imageUrl = this._plantImageUrl(this._plantWizardPhotoUrl || this._catalogImageUrl(item));
     return `
       <div class="profile-panel">
@@ -5140,39 +5256,48 @@ class GrowcubeCard extends HTMLElement {
             <input data-action="plant-wizard-name" value="${this._escape(this._plantWizardName || name)}" maxlength="64">
           </label>
           <label class="field">
-            <div class="label">Photo URL</div>
-            <input data-action="plant-wizard-photo-url" value="${this._escape(this._plantWizardPhotoUrl)}" placeholder="https://...">
-          </label>
-          <label class="field wide">
             <div class="label">Category</div>
             <input data-action="plant-wizard-category" value="${this._escape(this._plantWizardCategory || item.category || "")}" maxlength="128">
           </label>
           <label class="field wide">
-            <div class="label">Description</div>
-            <textarea data-action="plant-wizard-description" rows="5">${this._escape(about)}</textarea>
-          </label>
-          <label class="field">
-            <div class="label">Minimum temperature, °C</div>
-            <input type="number" min="-50" max="100" step="1" data-action="plant-wizard-temp-min" value="${this._plantWizardTempMin}">
-          </label>
-          <label class="field">
-            <div class="label">Maximum temperature, °C</div>
-            <input type="number" min="-50" max="100" step="1" data-action="plant-wizard-temp-max" value="${this._plantWizardTempMax}">
-          </label>
-          <label class="field">
-            <div class="label">Minimum air humidity, %</div>
-            <input type="number" min="0" max="100" step="1" data-action="plant-wizard-air-humidity-min" value="${this._plantWizardAirHumidityMin}">
-          </label>
-          <label class="field">
-            <div class="label">Maximum air humidity, %</div>
-            <input type="number" min="0" max="100" step="1" data-action="plant-wizard-air-humidity-max" value="${this._plantWizardAirHumidityMax}">
+            <div class="label">Photo</div>
+            <input type="file" accept="image/jpeg,image/png,image/webp" data-action="plant-wizard-photo-file">
+            <div class="label">${this._plantWizardPhotoUploading ? "Uploading photo..." : this._plantWizardPhotoFileName ? `Selected: ${this._escape(this._plantWizardPhotoFileName)}` : "JPEG, PNG, or WebP up to 1 MB"}</div>
           </label>
         </div>
-        <div class="profile-stats">
-          ${this._profileStatTemplate("Soil moisture", this._rangeText(this._plantWizardSmartMin, this._plantWizardSmartMax, "%"))}
-          ${this._profileStatTemplate("Temperature", this._rangeText(this._plantWizardTempMin, this._plantWizardTempMax, "°C"))}
-          ${this._profileStatTemplate("Air humidity", this._rangeText(this._plantWizardAirHumidityMin, this._plantWizardAirHumidityMax, "%"))}
-        </div>
+      </div>
+    `;
+  }
+
+  _plantWizardConditionsStep() {
+    const about = this._plantWizardDescription || "";
+    return `
+      <div class="grid">
+        <label class="field">
+          <div class="label">Minimum temperature, °C</div>
+          <input type="number" min="-50" max="100" step="1" data-action="plant-wizard-temp-min" value="${this._plantWizardTempMin}">
+        </label>
+        <label class="field">
+          <div class="label">Maximum temperature, °C</div>
+          <input type="number" min="-50" max="100" step="1" data-action="plant-wizard-temp-max" value="${this._plantWizardTempMax}">
+        </label>
+        <label class="field">
+          <div class="label">Minimum air humidity, %</div>
+          <input type="number" min="0" max="100" step="1" data-action="plant-wizard-air-humidity-min" value="${this._plantWizardAirHumidityMin}">
+        </label>
+        <label class="field">
+          <div class="label">Maximum air humidity, %</div>
+          <input type="number" min="0" max="100" step="1" data-action="plant-wizard-air-humidity-max" value="${this._plantWizardAirHumidityMax}">
+        </label>
+        <label class="field wide">
+          <div class="label">Description</div>
+          <textarea data-action="plant-wizard-description" rows="6">${this._escape(about)}</textarea>
+        </label>
+      </div>
+      <div class="profile-stats">
+        ${this._profileStatTemplate("Temperature", this._rangeText(this._plantWizardTempMin, this._plantWizardTempMax, "°C"))}
+        ${this._profileStatTemplate("Air humidity", this._rangeText(this._plantWizardAirHumidityMin, this._plantWizardAirHumidityMax, "%"))}
+        ${this._profileStatTemplate("Soil moisture", this._rangeText(this._plantWizardSmartMin, this._plantWizardSmartMax, "%"))}
       </div>
     `;
   }
@@ -6056,6 +6181,15 @@ class GrowcubeCard extends HTMLElement {
         this._plantWizardPhotoUrl = event.target.value;
       });
       wizardPhotoUrl.addEventListener("click", (event) => event.stopPropagation());
+    }
+
+    const wizardPhotoFile = this.shadowRoot.querySelector('[data-action="plant-wizard-photo-file"]');
+    if (wizardPhotoFile) {
+      wizardPhotoFile.addEventListener("change", (event) => {
+        const file = event.target.files?.[0];
+        this._uploadPlantWizardPhoto(file);
+      });
+      wizardPhotoFile.addEventListener("click", (event) => event.stopPropagation());
     }
 
     const wizardCategory = this.shadowRoot.querySelector('[data-action="plant-wizard-category"]');

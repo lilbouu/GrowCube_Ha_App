@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.64
+
+- Redesign the custom plant flow as a step-by-step wizard: choose catalog/custom, set name and photo, set growing conditions, choose channel, then configure watering.
+- Add local plant photo upload through the add-on API so custom plants can use device-selected JPEG, PNG, or WebP images instead of external URLs.
+
 ## 0.2.63
 
 - Add a custom plant path to the Web UI add-plant wizard with editable name, photo URL, category, description, temperature range, humidity range, and watering settings.
