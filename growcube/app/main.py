@@ -61,7 +61,7 @@ CARD_IMAGE_SOURCE_DIR = APP_DIR / "www" / "images"
 CARD_API_URL_PLACEHOLDER = "__GROWCUBE_ADDON_API_URL__"
 DEFAULT_INGRESS_PORT = 8099
 DEFAULT_INGRESS_ALLOWED_CIDRS = ("127.0.0.0/8", "::1/128", "172.30.0.0/16")
-CLOUD_CATALOG_HOSTS = ("https://api.growcube.cc",)
+CLOUD_CATALOG_HOSTS = ("https://api.growcube.cc", "http://api.growcube.cc")
 CLOUD_CATALOG_LIMIT = 40
 CLOUD_CATALOG_TIMEOUT_SECONDS = 20
 _PLANT_SEARCH_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
@@ -2557,7 +2557,13 @@ def fetch_catalog_json(path: str) -> dict[str, Any]:
                 )
                 return data if isinstance(data, dict) else {}
         except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError) as err:
-            LOGGER.warning("GrowCube cloud catalog request failed url=%s%s error=%s", host, path, err)
+            LOGGER.warning(
+                "GrowCube cloud catalog request failed url=%s%s error_type=%s error=%s",
+                host,
+                path,
+                type(err).__name__,
+                err,
+            )
             last_error = err
     if last_error is not None:
         raise last_error
