@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.57
+
+- Restore the GrowCube title in the Web UI top bar with the settings gear on the same row.
+- Align the standalone device switcher with the Web UI top bar.
+- Place the plant-detail back button in the title row so the plant title shifts right like the Settings page header.
+
 ## 0.2.56
 
 - Replace the Web UI text settings tab with a dashboard gear button and a settings back button.

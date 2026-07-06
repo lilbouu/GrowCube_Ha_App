@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.56-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.57-addon-compat";
 const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
@@ -453,7 +453,8 @@ class GrowcubeCard extends HTMLElement {
         channels[channel] = {
           ...nextChannel,
           plant_name: nextChannel.plant_name || previousChannel.plant_name || "",
-          photo_url: nextChannel.photo_url || previousChannel.photo_url || "",
+          photo_url: nextChannel.photo_url_value || nextChannel.photo_url || previousChannel.photo_url_value || previousChannel.photo_url || "",
+          photo_url_value: nextChannel.photo_url_value || previousChannel.photo_url_value || "",
           image_url: nextChannel.image_url || previousChannel.image_url || nextChannel.photo_url || previousChannel.photo_url || "",
           photo_url_entity: nextChannel.photo_url_entity || previousChannel.photo_url_entity || "",
           configured: nextChannel.configured ?? previousChannel.configured,
@@ -1146,6 +1147,7 @@ class GrowcubeCard extends HTMLElement {
   _currentPlantPhotoUrl(channel = this._channelKey()) {
     const channelMeta = this._deviceRecord()?.channels?.[channel] || {};
     return this._resolvedPlantPhotoUrl(
+      channelMeta.photo_url_value,
       channelMeta.image_url,
       channelMeta.photo_url,
       this._entities(channel).photo_url,
@@ -1877,6 +1879,15 @@ class GrowcubeCard extends HTMLElement {
     if (!text) {
       return "";
     }
+    if (this._looksLikeEntityId(text)) {
+      return "";
+    }
+    if (/^https:\/\/api\.growcube\.cc\/[a-z_]+\./i.test(text)) {
+      return "";
+    }
+    if (/\/plants\/image\?url=https%3A%2F%2Fapi\.growcube\.cc%2F[a-z_]+\./i.test(text)) {
+      return "";
+    }
     if (text.startsWith("//")) {
       return `https:${text}`;
     }
@@ -1940,6 +1951,9 @@ class GrowcubeCard extends HTMLElement {
         continue;
       }
       const state = this._state(raw);
+      if (!state && this._looksLikeEntityId(raw)) {
+        continue;
+      }
       const candidate = state ? state.state : raw;
       const url = this._plantImageUrl(candidate);
       if (url) {
@@ -2399,6 +2413,19 @@ class GrowcubeCard extends HTMLElement {
           padding-top: 62px;
         }
 
+        .dashboard-card.webui-standalone {
+          padding-top: 0;
+        }
+
+        .dashboard-card.webui-standalone .dashboard-toolbar {
+          top: -50px;
+          right: 72px;
+        }
+
+        .dashboard-card.webui-standalone.has-device-switcher .dashboard-grid {
+          padding-top: 0;
+        }
+
         .dashboard-column {
           display: grid;
           gap: 14px;
@@ -2731,10 +2758,6 @@ class GrowcubeCard extends HTMLElement {
         }
 
         .webui-back-button {
-          position: absolute;
-          top: -50px;
-          left: 8px;
-          z-index: 2;
           background: var(--ha-card-background, var(--card-background-color));
           border-color: var(--divider-color);
           box-shadow: 0 8px 18px rgba(0, 0, 0, 0.12);
@@ -2774,6 +2797,10 @@ class GrowcubeCard extends HTMLElement {
           gap: 14px;
           align-items: center;
           padding-top: 6px;
+        }
+
+        .plant-titlebar.has-webui-back {
+          grid-template-columns: auto auto minmax(0, 1fr) auto;
         }
 
         .plant-titlebar .plant-photo {
@@ -3727,8 +3754,9 @@ class GrowcubeCard extends HTMLElement {
   _dashboardTemplate({ entities }) {
     const device = this._deviceRecord();
     const hasDeviceSwitcher = this._deviceRecords().length > 1;
+    const standalone = window.GROWCUBE_STANDALONE_WEBUI;
     return `
-      <div class="dashboard-card ${hasDeviceSwitcher ? "has-device-switcher" : ""}">
+      <div class="dashboard-card ${hasDeviceSwitcher ? "has-device-switcher" : ""} ${standalone ? "webui-standalone" : ""}">
         <div class="dashboard-toolbar">
           ${this._globalDeviceSwitcherTemplate(device?.device_id)}
         </div>
@@ -3819,6 +3847,7 @@ class GrowcubeCard extends HTMLElement {
 
   _plantRowTemplate({ channel, entities, deviceId = "", metadata = {} }) {
     const photoUrl = this._resolvedPlantPhotoUrl(
+      metadata.photo_url_value,
       metadata.image_url,
       metadata.photo_url,
       entities.photo_url,
@@ -4118,17 +4147,18 @@ class GrowcubeCard extends HTMLElement {
       ? (data.smartDaytimeWatering ? "On" : "Off")
       : `${data.scheduleDuration} mL / ${Math.max(1, Math.round(data.interval / 24))}d`;
     const photoUrl = this._currentPlantPhotoUrl();
-    const standaloneBack = window.GROWCUBE_STANDALONE_WEBUI ? `
+    const standalone = window.GROWCUBE_STANDALONE_WEBUI;
+    const standaloneBack = standalone ? `
       <button type="button" class="icon-button webui-back-button" data-action="webui-back" aria-label="Back to dashboard">
         <ha-icon icon="mdi:arrow-left"></ha-icon>
       </button>
     ` : "";
     return `
       <div class="card detail detail-flat">
-        ${standaloneBack}
         <div class="plant-dashboard">
           <div class="plant-main plant-section">
-            <div class="plant-titlebar">
+            <div class="plant-titlebar ${standalone ? "has-webui-back" : ""}">
+              ${standaloneBack}
               <div class="plant-photo">
                 ${photoUrl ? `<img src="${this._escape(photoUrl)}" alt="" referrerpolicy="no-referrer">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
               </div>
@@ -4195,6 +4225,7 @@ class GrowcubeCard extends HTMLElement {
     const category = profile.category || "Plant profile";
     const channelMeta = this._deviceRecord()?.channels?.[this._channelKey()] || {};
     const photoUrl = this._resolvedPlantPhotoUrl(
+      channelMeta.photo_url_value,
       channelMeta.image_url,
       channelMeta.photo_url,
       data.entities.photo_url,

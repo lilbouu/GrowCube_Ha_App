@@ -436,6 +436,7 @@ class GrowCubeManager:
                 **dashboard_channel_entities(device_id, channel),
                 "plant_name": state.channels[index].config.plant_name,
                 "photo_url": state.channels[index].config.photo_url,
+                "photo_url_value": state.channels[index].config.photo_url,
                 "image_url": state.channels[index].config.photo_url,
                 "photo_url_entity": dashboard_channel_entities(device_id, channel)["photo_url"],
                 "configured": state.channels[index].plant_configured and state.channels[index].config.configured,
@@ -1711,7 +1712,7 @@ def web_ui_html() -> str:
     .topbar {
       display: flex;
       align-items: center;
-      justify-content: flex-end;
+      justify-content: space-between;
       gap: 12px;
       min-height: 42px;
       margin-bottom: 8px;
@@ -1813,8 +1814,8 @@ def web_ui_html() -> str:
     }
     @media (max-width: 640px) {
       main { padding: 16px; }
-      .topbar, .item { grid-template-columns: 1fr; display: grid; }
-      .topbar { justify-items: end; }
+      .topbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+      .item { grid-template-columns: 1fr; display: grid; }
       .item button:not(.icon-control) { width: 100%; }
     }
   </style>
@@ -1822,6 +1823,7 @@ def web_ui_html() -> str:
 <body>
 <main>
   <div class="topbar">
+    <h1>GrowCube</h1>
     <button class="icon-control" id="settingsBtn" type="button" aria-label="Settings">
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.9"></circle>
