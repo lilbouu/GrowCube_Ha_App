@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import gzip
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -2528,7 +2527,7 @@ def fetch_catalog_json(path: str) -> dict[str, Any]:
             f"{host}{path}",
             headers={
                 "Accept": "application/json",
-                "Accept-Encoding": "gzip",
+                "Accept-Encoding": "identity",
                 "Connection": "close",
                 "User-Agent": "GrowCube/4.1",
             },
@@ -2542,16 +2541,16 @@ def fetch_catalog_json(path: str) -> dict[str, Any]:
                 if response.headers.get("Content-Encoding", "").lower() == "gzip":
                     body = gzip.decompress(body)
                 body_text = body.decode("utf-8")
-                LOGGER.info("GrowCube cloud catalog raw response url=%s%s body=%s", host, path, body_text)
                 data = json.loads(body_text)
                 LOGGER.info(
-                    "GrowCube cloud catalog response url=%s%s status=%s bytes=%s wire_bytes=%s encoding=%s elapsed_ms=%s keys=%s",
+                    "GrowCube cloud catalog response url=%s%s status=%s bytes=%s wire_bytes=%s encoding=%s content_length=%s elapsed_ms=%s keys=%s",
                     host,
                     path,
                     response.status,
                     len(body),
                     wire_bytes,
                     response.headers.get("Content-Encoding", ""),
+                    response.headers.get("Content-Length", ""),
                     round((time.monotonic() - started) * 1000),
                     sorted(data.keys()) if isinstance(data, dict) else type(data).__name__,
                 )
@@ -2574,9 +2573,13 @@ def read_http_response_body(response, host: str, path: str) -> bytes:
     chunks: list[bytes] = []
     total = 0
     chunk_index = 0
+    content_length = optional_int(response.headers.get("Content-Length"))
     while True:
+        remaining = content_length - total if content_length is not None else None
+        if remaining is not None and remaining <= 0:
+            return b"".join(chunks)
         try:
-            chunk = response.read(8192)
+            chunk = response.read(min(8192, remaining) if remaining is not None else 8192)
         except TimeoutError:
             LOGGER.warning("GrowCube cloud catalog read timed out url=%s%s partial_wire_bytes=%s", host, path, total)
             raise
@@ -2585,14 +2588,13 @@ def read_http_response_body(response, host: str, path: str) -> bytes:
         chunk_index += 1
         chunks.append(chunk)
         total += len(chunk)
-        LOGGER.info(
-            "GrowCube cloud catalog wire chunk url=%s%s chunk=%s bytes=%s total_wire_bytes=%s base64=%s",
+        LOGGER.debug(
+            "GrowCube cloud catalog wire chunk url=%s%s chunk=%s bytes=%s total_wire_bytes=%s",
             host,
             path,
             chunk_index,
             len(chunk),
             total,
-            base64.b64encode(chunk).decode("ascii"),
         )
 
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.61
+
+- Request the GrowCube cloud catalog without gzip so larger plant searches use a `Content-Length` response instead of gzip chunked transfer, avoiding read timeouts on multi-result queries.
+- Stop logging full raw catalog JSON bodies and base64 wire chunks at info level; keep size, encoding, and key diagnostics in the response log.
+
 ## 0.2.60
 
 - Read GrowCube cloud catalog responses in chunks with `Connection: close` so larger plant searches do not hang waiting for the server to close the response.
