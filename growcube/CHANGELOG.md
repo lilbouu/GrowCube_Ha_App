@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.56
+
+- Replace the Web UI text settings tab with a dashboard gear button and a settings back button.
+- Move the standalone plant-detail back button above the card content.
+- Proxy GrowCube catalog plant images through the add-on Web UI.
+- Keep watering markers visible across the selected history window even when history points start later.
+
 ## 0.2.55
 
 - Restore the original watering marker styling on the moisture chart.

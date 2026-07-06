@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.55-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.56-addon-compat";
 const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
@@ -1893,7 +1893,19 @@ class GrowcubeCard extends HTMLElement {
   }
 
   _plantImageUrl(value) {
-    return this._normalizePlantImageUrl(value);
+    const url = this._normalizePlantImageUrl(value);
+    if (!url || !window.GROWCUBE_STANDALONE_WEBUI || !window.GROWCUBE_STANDALONE_ADDON_API_URL) {
+      return url;
+    }
+    try {
+      const parsed = new URL(url);
+      if (parsed.hostname === "api.growcube.cc") {
+        return `${window.GROWCUBE_STANDALONE_ADDON_API_URL}/plants/image?url=${encodeURIComponent(url)}`;
+      }
+    } catch (error) {
+      return url;
+    }
+    return url;
   }
 
   _plantPhotoCacheKey(deviceId, channel) {
@@ -2720,7 +2732,7 @@ class GrowcubeCard extends HTMLElement {
 
         .webui-back-button {
           position: absolute;
-          top: 8px;
+          top: -50px;
           left: 8px;
           z-index: 2;
           background: var(--ha-card-background, var(--card-background-color));
@@ -4648,15 +4660,11 @@ class GrowcubeCard extends HTMLElement {
     }
     const minTime = Number.isFinite(windowStart) ? windowStart : points[0].t;
     const maxTime = Number.isFinite(windowEnd) ? windowEnd : points[points.length - 1].t;
-    const graphStart = points[0].t;
-    const graphEnd = points[points.length - 1].t;
     const timeRange = Math.max(1, maxTime - minTime);
     return events
       .filter((timestamp) => (
         timestamp >= minTime
         && timestamp <= maxTime
-        && timestamp >= graphStart
-        && timestamp <= graphEnd
       ))
       .map((timestamp) => {
         const x = leftPadding + ((timestamp - minTime) / timeRange) * (width - leftPadding - padding);

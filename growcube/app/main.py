@@ -1711,22 +1711,29 @@ def web_ui_html() -> str:
     .topbar {
       display: flex;
       align-items: center;
-      justify-content: space-between;
+      justify-content: flex-end;
       gap: 12px;
-      margin-bottom: 14px;
+      min-height: 42px;
+      margin-bottom: 8px;
     }
     h1 { margin: 0; font-size: 22px; font-weight: 650; }
     h2 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     p { margin: 4px 0 0; color: var(--muted); }
-    .tabs { display: inline-flex; gap: 6px; border: 1px solid var(--line); border-radius: 8px; padding: 3px; }
-    .tab {
-      border: 0;
-      border-radius: 6px;
-      background: transparent;
-      color: var(--muted);
-      padding: 8px 11px;
+    .icon-control {
+      display: inline-flex;
+      width: 42px;
+      height: 42px;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--text);
+      padding: 0;
     }
-    .tab.active { background: var(--accent); color: #fff; }
+    .icon-control svg { width: 22px; height: 22px; }
+    .settings-header { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+    .settings-header h1 { font-size: 20px; }
     section {
       background: var(--panel);
       border: 1px solid var(--line);
@@ -1807,18 +1814,20 @@ def web_ui_html() -> str:
     @media (max-width: 640px) {
       main { padding: 16px; }
       .topbar, .item { grid-template-columns: 1fr; display: grid; }
-      .item button { width: 100%; }
+      .topbar { justify-items: end; }
+      .item button:not(.icon-control) { width: 100%; }
     }
   </style>
 </head>
 <body>
 <main>
   <div class="topbar">
-    <h1>GrowCube</h1>
-    <div class="tabs" role="tablist">
-      <button class="tab active" id="dashboardTab" type="button">Dashboard</button>
-      <button class="tab" id="settingsTab" type="button">Settings</button>
-    </div>
+    <button class="icon-control" id="settingsBtn" type="button" aria-label="Settings">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.9"></circle>
+        <path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.4 1a7 7 0 0 0-1.7-1L14.5 3h-5l-.4 3.1a7 7 0 0 0-1.7 1L5 6.1l-2 3.4L5.1 11a7 7 0 0 0 0 2L3 14.5l2 3.4 2.4-1a7 7 0 0 0 1.7 1l.4 3.1h5l.4-3.1a7 7 0 0 0 1.7-1l2.4 1 2-3.4-2.1-1.5c.1-.3.1-.7.1-1Z" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"></path>
+      </svg>
+    </button>
   </div>
 
   <div id="dashboardView">
@@ -1826,6 +1835,16 @@ def web_ui_html() -> str:
   </div>
 
   <div id="settingsView" class="hidden">
+    <div class="settings-header">
+      <button class="icon-control" id="settingsBackBtn" type="button" aria-label="Back to dashboard">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M19 12H5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"></path>
+          <path d="m12 5-7 7 7 7" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"></path>
+        </svg>
+      </button>
+      <h1>Settings</h1>
+    </div>
+
     <section>
       <div class="row" style="justify-content: space-between;">
         <h2>Devices</h2>
@@ -1857,6 +1876,7 @@ def web_ui_html() -> str:
 </main>
 <script>
 window.GROWCUBE_STANDALONE_WEBUI = true;
+window.GROWCUBE_STANDALONE_ADDON_API_URL = "";
 if (!customElements.get("ha-card")) customElements.define("ha-card", class extends HTMLElement {});
 if (!customElements.get("ha-icon")) {
   customElements.define("ha-icon", class extends HTMLElement {
@@ -1879,6 +1899,7 @@ const statusEl = document.getElementById("discoverStatus");
 const dashboardCard = document.getElementById("growcubeDashboard");
 const basePath = window.location.pathname.endsWith("/") ? (window.location.pathname.slice(0, -1) || "/") : window.location.pathname;
 const addonApiUrl = `${window.location.origin}${basePath === "/" ? "" : basePath}`;
+window.GROWCUBE_STANDALONE_ADDON_API_URL = addonApiUrl;
 let dashboardPayload = {devices: []};
 
 function iconSvg(icon) {
@@ -1905,6 +1926,7 @@ function iconSvg(icon) {
     "mdi:message-alert-outline": `<path ${common} d="M5 5h14v10H9l-4 4V5Z"/><path ${common} d="M12 7v4"/><circle ${filled} cx="12" cy="13" r="1"/>`,
     "mdi:chart-bell-curve": `<path ${common} d="M4 18h16"/><path ${common} d="M5 17c3 0 3-10 7-10s4 10 7 10"/>`,
     "mdi:checkbox-blank-circle-outline": `<circle ${common} cx="12" cy="12" r="7"/>`,
+    "mdi:cog": `<circle ${common} cx="12" cy="12" r="3"/><path ${common} d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.4 1a7 7 0 0 0-1.7-1L14.5 3h-5l-.4 3.1a7 7 0 0 0-1.7 1L5 6.1l-2 3.4L5.1 11a7 7 0 0 0 0 2L3 14.5l2 3.4 2.4-1a7 7 0 0 0 1.7 1l.4 3.1h5l.4-3.1a7 7 0 0 0 1.7-1l2.4 1 2-3.4-2.1-1.5c.1-.3.1-.7.1-1Z"/>`,
   };
   return icons[icon] || `<circle ${common} cx="12" cy="12" r="8"/><path ${common} d="M12 8v4l3 3"/>`;
 }
@@ -2100,8 +2122,8 @@ async function discoverDevices() {
 
 document.getElementById("refreshBtn").addEventListener("click", refreshDevices);
 document.getElementById("discoverBtn").addEventListener("click", discoverDevices);
-document.getElementById("dashboardTab").addEventListener("click", () => setActiveView("dashboard"));
-document.getElementById("settingsTab").addEventListener("click", () => setActiveView("settings"));
+document.getElementById("settingsBtn").addEventListener("click", () => setActiveView("settings"));
+document.getElementById("settingsBackBtn").addEventListener("click", () => setActiveView("dashboard"));
 document.getElementById("addManualBtn").addEventListener("click", async () => {
   const host = document.getElementById("hostInput").value.trim();
   const name = document.getElementById("nameInput").value.trim();
@@ -2113,8 +2135,7 @@ function setActiveView(view) {
   const settings = view === "settings";
   document.getElementById("dashboardView").classList.toggle("hidden", settings);
   document.getElementById("settingsView").classList.toggle("hidden", !settings);
-  document.getElementById("dashboardTab").classList.toggle("active", !settings);
-  document.getElementById("settingsTab").classList.toggle("active", settings);
+  document.querySelector(".topbar").classList.toggle("hidden", settings);
   if (settings) refreshDevices().catch(() => {});
 }
 
@@ -2179,6 +2200,9 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
                 plants = search_plants(query)
                 LOGGER.info("Plant search finished query=%r results=%s", query, len(plants))
                 self._write_json({"plants": plants})
+            elif parsed.path == "/plants/image":
+                body, content_type = fetch_remote_image(first_query_value(params, "url"))
+                self._write_bytes(body, content_type)
             elif parsed.path == "/dashboard":
                 self._write_json(manager.dashboard_payload())
             elif parsed.path == "/devices":
@@ -2710,6 +2734,25 @@ def image_content_type(path: Path) -> str:
     if suffix == ".webp":
         return "image/webp"
     return "application/octet-stream"
+
+
+def fetch_remote_image(url_value: str) -> tuple[bytes, str]:
+    url = str(url_value or "").strip()
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("invalid image url")
+    request = Request(
+        url,
+        headers={
+            "Accept": "image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8",
+            "User-Agent": "GrowCube/4.1",
+        },
+    )
+    with urlopen(request, timeout=20) as response:
+        content_type = response.headers.get("Content-Type", "application/octet-stream").split(";", 1)[0].strip()
+        if not content_type.startswith("image/"):
+            raise ValueError("remote url is not an image")
+        return response.read(), content_type
 
 
 def lovelace_card_version(card_source: str) -> str:
