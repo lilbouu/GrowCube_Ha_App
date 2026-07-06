@@ -60,9 +60,10 @@ CARD_IMAGE_SOURCE_DIR = APP_DIR / "www" / "images"
 CARD_API_URL_PLACEHOLDER = "__GROWCUBE_ADDON_API_URL__"
 DEFAULT_INGRESS_PORT = 8099
 DEFAULT_INGRESS_ALLOWED_CIDRS = ("127.0.0.0/8", "::1/128", "172.30.0.0/16")
-CLOUD_CATALOG_HOSTS = ("https://api.growcube.cc", "http://api.growcube.cc")
+CLOUD_CATALOG_HOSTS = ("http://api.growcube.cc", "https://api.growcube.cc")
 CLOUD_CATALOG_LIMIT = 40
 CLOUD_CATALOG_TIMEOUT_SECONDS = 20
+CLOUD_CATALOG_FALLBACK_TIMEOUT_SECONDS = 5
 _PLANT_SEARCH_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _PLANT_SEARCH_FAILURE_CACHE: dict[str, tuple[float, str]] = {}
 PLANT_SEARCH_CACHE_TTL_SECONDS = 15 * 60
@@ -2535,7 +2536,8 @@ def fetch_catalog_json(path: str) -> dict[str, Any]:
         try:
             LOGGER.info("GrowCube cloud catalog request url=%s%s", host, path)
             started = time.monotonic()
-            with urlopen(request, timeout=CLOUD_CATALOG_TIMEOUT_SECONDS) as response:
+            timeout = CLOUD_CATALOG_TIMEOUT_SECONDS if host.startswith("http://") else CLOUD_CATALOG_FALLBACK_TIMEOUT_SECONDS
+            with urlopen(request, timeout=timeout) as response:
                 body = read_http_response_body(response, host, path)
                 wire_bytes = len(body)
                 if response.headers.get("Content-Encoding", "").lower() == "gzip":

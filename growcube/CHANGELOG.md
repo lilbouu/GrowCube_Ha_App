@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.63
+
+- Add a custom plant path to the Web UI add-plant wizard with editable name, photo URL, category, description, temperature range, humidity range, and watering settings.
+- Let catalog plant profiles be customized before saving so users can override catalog metadata per channel.
+
+## 0.2.62
+
+- Prefer the GrowCube cloud catalog HTTP endpoint because HTTPS can stall inside HAOS add-on networking before falling back to the working HTTP endpoint.
+- Use a shorter timeout for the HTTPS fallback so catalog searches do not block the ingress API for a full catalog timeout when HTTP is unavailable.
+
 ## 0.2.61
 
 - Request the GrowCube cloud catalog without gzip so larger plant searches use a `Content-Length` response instead of gzip chunked transfer, avoiding read timeouts on multi-result queries.
