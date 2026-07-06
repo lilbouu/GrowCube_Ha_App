@@ -1717,6 +1717,12 @@ def web_ui_html() -> str:
       min-height: 42px;
       margin-bottom: 8px;
     }
+    .topbar-title {
+      display: inline-flex;
+      min-width: 0;
+      align-items: center;
+      gap: 10px;
+    }
     h1 { margin: 0; font-size: 22px; font-weight: 650; }
     h2 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     p { margin: 4px 0 0; color: var(--muted); }
@@ -1823,7 +1829,15 @@ def web_ui_html() -> str:
 <body>
 <main>
   <div class="topbar">
-    <h1>GrowCube</h1>
+    <div class="topbar-title">
+      <button class="icon-control hidden" id="plantBackBtn" type="button" aria-label="Back to dashboard">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M19 12H5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"></path>
+          <path d="m12 5-7 7 7 7" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"></path>
+        </svg>
+      </button>
+      <h1>GrowCube</h1>
+    </div>
     <button class="icon-control" id="settingsBtn" type="button" aria-label="Settings">
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.9"></circle>
@@ -2039,6 +2053,7 @@ function applyCardConfigFromLocation() {
   const next = cardConfigFromLocation();
   const current = dashboardCard._webUiRouteKey || "";
   const routeKey = JSON.stringify(next);
+  document.getElementById("plantBackBtn").classList.toggle("hidden", !next.detail);
   if (current !== routeKey) {
     dashboardCard.setConfig(next);
     dashboardCard._webUiRouteKey = routeKey;
@@ -2125,6 +2140,13 @@ async function discoverDevices() {
 document.getElementById("refreshBtn").addEventListener("click", refreshDevices);
 document.getElementById("discoverBtn").addEventListener("click", discoverDevices);
 document.getElementById("settingsBtn").addEventListener("click", () => setActiveView("settings"));
+document.getElementById("plantBackBtn").addEventListener("click", () => {
+  const params = new URLSearchParams(window.location.search || "");
+  params.delete("view");
+  const query = params.toString();
+  window.history.pushState(null, "", `${basePath}${query ? "?" + query : ""}`);
+  window.dispatchEvent(new CustomEvent("location-changed"));
+});
 document.getElementById("settingsBackBtn").addEventListener("click", () => setActiveView("dashboard"));
 document.getElementById("addManualBtn").addEventListener("click", async () => {
   const host = document.getElementById("hostInput").value.trim();

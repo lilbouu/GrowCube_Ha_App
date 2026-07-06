@@ -2757,12 +2757,6 @@ class GrowcubeCard extends HTMLElement {
           background: transparent;
         }
 
-        .webui-back-button {
-          background: var(--ha-card-background, var(--card-background-color));
-          border-color: var(--divider-color);
-          box-shadow: 0 8px 18px rgba(0, 0, 0, 0.12);
-        }
-
         .plant-dashboard {
           display: grid;
           grid-template-columns: minmax(0, 1fr);
@@ -2797,10 +2791,6 @@ class GrowcubeCard extends HTMLElement {
           gap: 14px;
           align-items: center;
           padding-top: 6px;
-        }
-
-        .plant-titlebar.has-webui-back {
-          grid-template-columns: auto auto minmax(0, 1fr) auto;
         }
 
         .plant-titlebar .plant-photo {
@@ -4147,18 +4137,11 @@ class GrowcubeCard extends HTMLElement {
       ? (data.smartDaytimeWatering ? "On" : "Off")
       : `${data.scheduleDuration} mL / ${Math.max(1, Math.round(data.interval / 24))}d`;
     const photoUrl = this._currentPlantPhotoUrl();
-    const standalone = window.GROWCUBE_STANDALONE_WEBUI;
-    const standaloneBack = standalone ? `
-      <button type="button" class="icon-button webui-back-button" data-action="webui-back" aria-label="Back to dashboard">
-        <ha-icon icon="mdi:arrow-left"></ha-icon>
-      </button>
-    ` : "";
     return `
       <div class="card detail detail-flat">
         <div class="plant-dashboard">
           <div class="plant-main plant-section">
-            <div class="plant-titlebar ${standalone ? "has-webui-back" : ""}">
-              ${standaloneBack}
+            <div class="plant-titlebar">
               <div class="plant-photo">
                 ${photoUrl ? `<img src="${this._escape(photoUrl)}" alt="" referrerpolicy="no-referrer">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
               </div>
@@ -5808,11 +5791,6 @@ class GrowcubeCard extends HTMLElement {
           event.stopPropagation();
           this._detailMenuOpen = !this._detailMenuOpen;
           this._render();
-        } else if (action === "webui-back") {
-          event.stopPropagation();
-          const path = this._detailBackPath();
-          window.history.pushState(null, "", path);
-          window.dispatchEvent(new CustomEvent("location-changed"));
         } else if (action === "open-about") {
           event.stopPropagation();
           this._detailMenuOpen = false;
