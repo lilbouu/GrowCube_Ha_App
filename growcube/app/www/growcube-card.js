@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.59-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.60-addon-compat";
 const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
@@ -244,6 +244,13 @@ class GrowcubeCard extends HTMLElement {
       throw new Error(`GrowCube add-on API failed: ${response.status} ${response.statusText}: ${body.slice(0, 240)}`);
     }
     const body = await response.text();
+    if (String(path).replace(/^\/+/, "").startsWith("plants/search")) {
+      console.info("[GrowCube] add-on API raw response", {
+        url,
+        elapsedMs: Math.round(performance.now() - started),
+        body,
+      });
+    }
     let result;
     try {
       result = body ? JSON.parse(body) : {};
@@ -1700,7 +1707,7 @@ class GrowcubeCard extends HTMLElement {
     try {
       const result = await this._fetchAddonApi(`plants/search?query=${encodeURIComponent(query)}`);
       const plants = Array.isArray(result?.plants) ? result.plants : [];
-      console.info("[GrowCube] add-on plant search result", { query, count: plants.length });
+      console.info("[GrowCube] add-on plant search result", { query, count: plants.length, plants });
       if (plants.length) {
         return this._normalizeCatalogPlants(plants);
       }

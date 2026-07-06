@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.60
+
+- Read GrowCube cloud catalog responses in chunks with `Connection: close` so larger plant searches do not hang waiting for the server to close the response.
+
 ## 0.2.59
 
 - Increase the GrowCube cloud catalog timeout and log compressed/uncompressed response sizes so larger plant searches such as `rose` can complete instead of timing out too early.

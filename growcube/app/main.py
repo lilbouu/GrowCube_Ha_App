@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import gzip
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -2528,6 +2529,7 @@ def fetch_catalog_json(path: str) -> dict[str, Any]:
             headers={
                 "Accept": "application/json",
                 "Accept-Encoding": "gzip",
+                "Connection": "close",
                 "User-Agent": "GrowCube/4.1",
             },
         )
@@ -2535,11 +2537,13 @@ def fetch_catalog_json(path: str) -> dict[str, Any]:
             LOGGER.info("GrowCube cloud catalog request url=%s%s", host, path)
             started = time.monotonic()
             with urlopen(request, timeout=CLOUD_CATALOG_TIMEOUT_SECONDS) as response:
-                body = response.read()
+                body = read_http_response_body(response, host, path)
                 wire_bytes = len(body)
                 if response.headers.get("Content-Encoding", "").lower() == "gzip":
                     body = gzip.decompress(body)
-                data = json.loads(body.decode("utf-8"))
+                body_text = body.decode("utf-8")
+                LOGGER.info("GrowCube cloud catalog raw response url=%s%s body=%s", host, path, body_text)
+                data = json.loads(body_text)
                 LOGGER.info(
                     "GrowCube cloud catalog response url=%s%s status=%s bytes=%s wire_bytes=%s encoding=%s elapsed_ms=%s keys=%s",
                     host,
@@ -2558,6 +2562,32 @@ def fetch_catalog_json(path: str) -> dict[str, Any]:
     if last_error is not None:
         raise last_error
     return {}
+
+
+def read_http_response_body(response, host: str, path: str) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    chunk_index = 0
+    while True:
+        try:
+            chunk = response.read(8192)
+        except TimeoutError:
+            LOGGER.warning("GrowCube cloud catalog read timed out url=%s%s partial_wire_bytes=%s", host, path, total)
+            raise
+        if not chunk:
+            return b"".join(chunks)
+        chunk_index += 1
+        chunks.append(chunk)
+        total += len(chunk)
+        LOGGER.info(
+            "GrowCube cloud catalog wire chunk url=%s%s chunk=%s bytes=%s total_wire_bytes=%s base64=%s",
+            host,
+            path,
+            chunk_index,
+            len(chunk),
+            total,
+            base64.b64encode(chunk).decode("ascii"),
+        )
 
 
 def plant_from_api(plant: dict[str, Any]) -> dict[str, Any]:
