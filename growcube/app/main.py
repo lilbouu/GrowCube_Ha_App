@@ -62,7 +62,7 @@ DEFAULT_INGRESS_PORT = 8099
 DEFAULT_INGRESS_ALLOWED_CIDRS = ("127.0.0.0/8", "::1/128", "172.30.0.0/16")
 CLOUD_CATALOG_HOSTS = ("https://api.growcube.cc", "http://api.growcube.cc")
 CLOUD_CATALOG_LIMIT = 40
-CLOUD_CATALOG_TIMEOUT_SECONDS = 45
+CLOUD_CATALOG_TIMEOUT_SECONDS = 8
 _PLANT_SEARCH_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 PLANT_SEARCH_CACHE_TTL_SECONDS = 15 * 60
 _SUPERVISOR_INGRESS_URL_CACHE: str | None = None
@@ -2417,11 +2417,12 @@ def search_plants(query: str) -> list[dict[str, Any]]:
     LOGGER.info("Searching GrowCube cloud catalog for %r", query)
     try:
         data = fetch_catalog_json(f"/api/en/plants/name/{quote(query, safe='')}")
-    except Exception:
+    except Exception as err:
         if cached is not None:
             LOGGER.warning("Plant search cloud failed; returning stale cache query=%r results=%s", query, len(cached[1]))
             return cached[1]
-        raise
+        LOGGER.warning("Plant search cloud failed; returning empty result query=%r error=%s", query, err)
+        return []
     plants = data.get("plants")
     if not isinstance(plants, list):
         LOGGER.warning("GrowCube cloud catalog returned no plants list for query=%r keys=%s", query, sorted(data.keys()))
@@ -2540,7 +2541,7 @@ def fetch_catalog_json(path: str) -> dict[str, Any]:
                     sorted(data.keys()) if isinstance(data, dict) else type(data).__name__,
                 )
                 return data if isinstance(data, dict) else {}
-        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as err:
+        except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError) as err:
             LOGGER.warning("GrowCube cloud catalog request failed url=%s%s error=%s", host, path, err)
             last_error = err
     if last_error is not None:

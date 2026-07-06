@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.57-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.58-addon-compat";
 const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
