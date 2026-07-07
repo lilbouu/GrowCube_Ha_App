@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.66
+
+- Move custom plant access into a Custom button beside Search on the first add-plant step.
+- Add a custom plant library dialog that lists saved custom profiles, shows an empty state when none exist, and offers an Add custom plant action.
+
 ## 0.2.65
 
 - Restore the short catalog plant add flow while keeping the extended name, photo, description, and growing conditions flow only for custom plants.
