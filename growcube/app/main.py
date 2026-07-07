@@ -63,14 +63,11 @@ PLANT_PHOTO_DIR = DATA_DIR / "plant_photos"
 CARD_API_URL_PLACEHOLDER = "__GROWCUBE_ADDON_API_URL__"
 DEFAULT_INGRESS_PORT = 8099
 DEFAULT_INGRESS_ALLOWED_CIDRS = ("127.0.0.0/8", "::1/128", "172.30.0.0/16")
-CLOUD_CATALOG_HOSTS = ("http://api.growcube.cc", "https://api.growcube.cc")
+CLOUD_CATALOG_HOSTS = ("https://api.growcube.cc", "http://api.growcube.cc")
 CLOUD_CATALOG_LIMIT = 40
 CLOUD_CATALOG_TIMEOUT_SECONDS = 20
-CLOUD_CATALOG_FALLBACK_TIMEOUT_SECONDS = 5
 _PLANT_SEARCH_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
-_PLANT_SEARCH_FAILURE_CACHE: dict[str, tuple[float, str]] = {}
 PLANT_SEARCH_CACHE_TTL_SECONDS = 15 * 60
-PLANT_SEARCH_FAILURE_TTL_SECONDS = 60
 _SUPERVISOR_INGRESS_URL_CACHE: str | None = None
 CARD_TARGET_PATHS = (
     Path("/config/www/growcube/growcube-card.js"),
@@ -2465,27 +2462,20 @@ def search_plants(query: str) -> list[dict[str, Any]]:
     if cached is not None and now - cached[0] < PLANT_SEARCH_CACHE_TTL_SECONDS:
         LOGGER.info("Plant search cache hit query=%r results=%s", query, len(cached[1]))
         return cached[1]
-    failed = _PLANT_SEARCH_FAILURE_CACHE.get(cache_key)
-    if failed is not None and now - failed[0] < PLANT_SEARCH_FAILURE_TTL_SECONDS:
-        LOGGER.warning("Plant search recent cloud failure query=%r error=%s", query, failed[1])
-        return []
     LOGGER.info("Searching GrowCube cloud catalog for %r", query)
     try:
         data = fetch_catalog_json(f"/api/en/plants/name/{quote(query, safe='')}")
-    except Exception as err:
+    except Exception:
         if cached is not None:
             LOGGER.warning("Plant search cloud failed; returning stale cache query=%r results=%s", query, len(cached[1]))
             return cached[1]
-        LOGGER.warning("Plant search cloud failed; returning empty result query=%r error=%s", query, err)
-        _PLANT_SEARCH_FAILURE_CACHE[cache_key] = (now, str(err))
-        return []
+        raise
     plants = data.get("plants")
     if not isinstance(plants, list):
         LOGGER.warning("GrowCube cloud catalog returned no plants list for query=%r keys=%s", query, sorted(data.keys()))
         return []
     result = [plant_from_api(plant) for plant in plants[:CLOUD_CATALOG_LIMIT] if isinstance(plant, dict)]
     _PLANT_SEARCH_CACHE[cache_key] = (now, result)
-    _PLANT_SEARCH_FAILURE_CACHE.pop(cache_key, None)
     LOGGER.info("Plant search cache stored query=%r results=%s", query, len(result))
     return result
 
@@ -2576,76 +2566,34 @@ def fetch_catalog_json(path: str) -> dict[str, Any]:
             f"{host}{path}",
             headers={
                 "Accept": "application/json",
-                "Accept-Encoding": "identity",
-                "Connection": "close",
+                "Accept-Encoding": "gzip",
                 "User-Agent": "GrowCube/4.1",
             },
         )
         try:
             LOGGER.info("GrowCube cloud catalog request url=%s%s", host, path)
             started = time.monotonic()
-            timeout = CLOUD_CATALOG_TIMEOUT_SECONDS if host.startswith("http://") else CLOUD_CATALOG_FALLBACK_TIMEOUT_SECONDS
-            with urlopen(request, timeout=timeout) as response:
-                body = read_http_response_body(response, host, path)
-                wire_bytes = len(body)
+            with urlopen(request, timeout=CLOUD_CATALOG_TIMEOUT_SECONDS) as response:
+                body = response.read()
                 if response.headers.get("Content-Encoding", "").lower() == "gzip":
                     body = gzip.decompress(body)
-                body_text = body.decode("utf-8")
-                data = json.loads(body_text)
+                data = json.loads(body.decode("utf-8"))
                 LOGGER.info(
-                    "GrowCube cloud catalog response url=%s%s status=%s bytes=%s wire_bytes=%s encoding=%s content_length=%s elapsed_ms=%s keys=%s",
+                    "GrowCube cloud catalog response url=%s%s status=%s bytes=%s elapsed_ms=%s keys=%s",
                     host,
                     path,
                     response.status,
                     len(body),
-                    wire_bytes,
-                    response.headers.get("Content-Encoding", ""),
-                    response.headers.get("Content-Length", ""),
                     round((time.monotonic() - started) * 1000),
                     sorted(data.keys()) if isinstance(data, dict) else type(data).__name__,
                 )
                 return data if isinstance(data, dict) else {}
-        except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError) as err:
-            LOGGER.warning(
-                "GrowCube cloud catalog request failed url=%s%s error_type=%s error=%s",
-                host,
-                path,
-                type(err).__name__,
-                err,
-            )
+        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as err:
+            LOGGER.warning("GrowCube cloud catalog request failed url=%s%s error=%s", host, path, err)
             last_error = err
     if last_error is not None:
         raise last_error
     return {}
-
-
-def read_http_response_body(response, host: str, path: str) -> bytes:
-    chunks: list[bytes] = []
-    total = 0
-    chunk_index = 0
-    content_length = optional_int(response.headers.get("Content-Length"))
-    while True:
-        remaining = content_length - total if content_length is not None else None
-        if remaining is not None and remaining <= 0:
-            return b"".join(chunks)
-        try:
-            chunk = response.read(min(8192, remaining) if remaining is not None else 8192)
-        except TimeoutError:
-            LOGGER.warning("GrowCube cloud catalog read timed out url=%s%s partial_wire_bytes=%s", host, path, total)
-            raise
-        if not chunk:
-            return b"".join(chunks)
-        chunk_index += 1
-        chunks.append(chunk)
-        total += len(chunk)
-        LOGGER.debug(
-            "GrowCube cloud catalog wire chunk url=%s%s chunk=%s bytes=%s total_wire_bytes=%s",
-            host,
-            path,
-            chunk_index,
-            len(chunk),
-            total,
-        )
 
 
 def plant_from_api(plant: dict[str, Any]) -> dict[str, Any]:

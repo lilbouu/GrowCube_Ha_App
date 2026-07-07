@@ -1750,7 +1750,7 @@ class GrowcubeCard extends HTMLElement {
     try {
       const result = await this._fetchAddonApi(`plants/search?query=${encodeURIComponent(query)}`);
       const plants = Array.isArray(result?.plants) ? result.plants : [];
-      console.info("[GrowCube] add-on plant search result", { query, count: plants.length, plants });
+      console.info("[GrowCube] add-on plant search result", { query, count: plants.length });
       if (plants.length) {
         return this._normalizeCatalogPlants(plants);
       }
