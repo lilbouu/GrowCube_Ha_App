@@ -1,5 +1,5 @@
 # Paste this file into a Home Assistant dashboard YAML editor after adding
-# /local/growcube/growcube-card-0.2.72-addon-compat.js as a Lovelace resource.
+# /local/growcube/growcube-card-0.2.73-addon-compat.js as a Lovelace resource.
 title: GrowCube
 views:
   - title: GrowCube

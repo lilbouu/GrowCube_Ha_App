@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.73
+
+- Make plant catalog search in Home Assistant dashboard cards load add-on dashboard metadata before falling back to custom-only results.
+- Bump the Lovelace card resource version so Home Assistant reloads the dashboard search fix.
+
 ## 0.2.72
 
 - Document the two supported usage paths: the built-in Web UI and a Home Assistant dashboard.

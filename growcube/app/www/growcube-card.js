@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.72-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.73-addon-compat";
 const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
@@ -1844,6 +1844,9 @@ class GrowcubeCard extends HTMLElement {
   }
 
   async _catalogSearch(query) {
+    if (!this._addonApiUrlCache) {
+      await this._loadDashboardDevicesIfNeeded(true);
+    }
     try {
       const result = await this._fetchAddonApi(`plants/search?query=${encodeURIComponent(query)}`);
       const plants = Array.isArray(result?.plants) ? result.plants : [];
