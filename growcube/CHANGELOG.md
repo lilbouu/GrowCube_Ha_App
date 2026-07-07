@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.76
+
+- Allow the direct dashboard API on port `8099` from private LAN clients by default so Home Assistant dashboard cards can search the plant catalog without relying on rotating ingress tokens.
+
 ## 0.2.75
 
 - Prefer the direct add-on API on port `8099` for Home Assistant dashboard cards before falling back to MQTT/bundled ingress URLs, avoiding stale ingress tokens in plant search.
