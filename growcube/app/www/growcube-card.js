@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.74-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.75-addon-compat";
 const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
@@ -343,6 +343,12 @@ class GrowcubeCard extends HTMLElement {
       console.info("[GrowCube] discovered add-on API URL", { url: discoveredUrl });
       return discoveredUrl;
     }
+    const directUrl = this._directAddonApiUrl();
+    if (directUrl) {
+      this._addonApiUrlCache = directUrl;
+      console.info("[GrowCube] using direct add-on API URL", { url: this._addonApiUrlCache });
+      return this._addonApiUrlCache;
+    }
     const entityUrl = this._addonApiUrlFromState();
     if (entityUrl) {
       this._addonApiUrlCache = entityUrl;
@@ -353,12 +359,6 @@ class GrowcubeCard extends HTMLElement {
     if (bundled && bundled !== "__GROWCUBE_ADDON_API_URL__") {
       this._addonApiUrlCache = this._normalizeAddonApiUrl(bundled);
       console.info("[GrowCube] using bundled add-on API URL", { url: this._addonApiUrlCache });
-      return this._addonApiUrlCache;
-    }
-    const directUrl = this._directAddonApiUrl();
-    if (directUrl) {
-      this._addonApiUrlCache = directUrl;
-      console.info("[GrowCube] using direct add-on API URL", { url: this._addonApiUrlCache });
       return this._addonApiUrlCache;
     }
     return "";

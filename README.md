@@ -133,13 +133,13 @@ The GrowCube add-on log should contain:
 
 ```text
 GrowCube Lovelace card copied to /config/www/growcube/growcube-card.js
-GrowCube Lovelace card copied to /config/www/growcube/growcube-card-0.2.74-addon-compat.js
+GrowCube Lovelace card copied to /config/www/growcube/growcube-card-0.2.75-addon-compat.js
 ```
 
 Home Assistant serves that file as:
 
 ```text
-/local/growcube/growcube-card-0.2.74-addon-compat.js
+/local/growcube/growcube-card-0.2.75-addon-compat.js
 ```
 
 Add it as a Lovelace resource:
@@ -149,7 +149,7 @@ Add it as a Lovelace resource:
 3. Add a JavaScript module resource:
 
 ```text
-/local/growcube/growcube-card-0.2.74-addon-compat.js
+/local/growcube/growcube-card-0.2.75-addon-compat.js
 ```
 
 Use the ready-to-paste dashboard YAML:

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.75
+
+- Prefer the direct add-on API on port `8099` for Home Assistant dashboard cards before falling back to MQTT/bundled ingress URLs, avoiding stale ingress tokens in plant search.
+
 ## 0.2.74
 
 - Prefer runtime Home Assistant Supervisor ingress discovery for dashboard cards so plant search does not use a stale baked `/api/hassio_ingress/...` URL.
