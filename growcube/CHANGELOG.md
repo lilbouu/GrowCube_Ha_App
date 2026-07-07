@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.68
+
+- Keep uploaded Home Assistant ingress plant photo URLs on their original HTTP scheme so local photos render after upload.
+- Replace custom growing-condition sliders with numeric minimum and maximum inputs.
+- Harden custom profile creation so saving returns to the custom plant library instead of continuing to channel selection.
+
+## 0.2.67
+
+- Change custom plant creation into a profile-only flow that returns to the custom plant library instead of adding directly to a channel.
+- Page the custom plant library three profiles at a time and let selected custom profiles use the normal add-to-channel flow.
+- Stop re-rendering the add-plant wizard while dragging custom growing-condition sliders.
+
 ## 0.2.66
 
 - Move custom plant access into a Custom button beside Search on the first add-plant step.
