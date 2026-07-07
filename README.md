@@ -139,7 +139,7 @@ GrowCube Lovelace card copied to /config/www/growcube/growcube-card-0.2.76-addon
 Home Assistant serves that file as:
 
 ```text
-/local/growcube/growcube-card-0.2.76-addon-compat.js
+/local/growcube/growcube-card.js
 ```
 
 Add it as a Lovelace resource:
@@ -149,7 +149,7 @@ Add it as a Lovelace resource:
 3. Add a JavaScript module resource:
 
 ```text
-/local/growcube/growcube-card-0.2.76-addon-compat.js
+/local/growcube/growcube-card.js
 ```
 
 Use the ready-to-paste dashboard YAML:
