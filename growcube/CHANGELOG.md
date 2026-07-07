@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.72
+
+- Document the two supported usage paths: the built-in Web UI and a Home Assistant dashboard.
+- Restore optional static GrowCube device configuration in add-on options while keeping Web UI device management.
+- Point dashboard setup to the ready-to-paste YAML in `docs/lovelace-growcube-mqtt-dashboard.yaml`.
+- Keep GrowCube TCP devices on port `8800` by default when they are configured in add-on options.
+
 ## 0.2.71
 
 - Refresh standalone Web UI dashboard card state immediately after device add/remove and service calls.

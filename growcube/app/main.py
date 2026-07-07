@@ -250,10 +250,12 @@ class GrowCubeManager:
     def load(self) -> None:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         stored = self._read_json(STATE_PATH, {})
+        options = self._read_json(OPTIONS_PATH, {})
 
         stored_devices: list[dict[str, Any]] = []
         if isinstance(stored.get("devices"), list):
             stored_devices.extend(item for item in stored["devices"] if isinstance(item, dict))
+        option_devices = self._option_devices(options)
 
         with self.lock:
             self.devices = {}
@@ -262,9 +264,28 @@ class GrowCubeManager:
                 state = self._state_from_dict(item)
                 if state.host:
                     devices_by_host[state.host.strip().lower()] = state
+            for item in option_devices:
+                host = str(item.get("host") or "").strip()
+                if not host:
+                    continue
+                key = host.lower()
+                name = str(item.get("name") or host).strip()
+                port = max(1, min(65535, int(item.get("port") or 8800)))
+                existing = devices_by_host.get(key)
+                if existing is not None:
+                    existing.name = name or existing.name or host
+                    existing.port = port
+                else:
+                    devices_by_host[key] = self._state_from_dict(
+                        {
+                            "name": name or host,
+                            "host": host,
+                            "port": port,
+                        }
+                    )
 
             self.devices = {state.id: state for state in devices_by_host.values()}
-            LOGGER.info("Loaded %s GrowCube device(s) from add-on data", len(self.devices))
+            LOGGER.info("Loaded %s GrowCube device(s) from add-on data/options", len(self.devices))
 
     def start_loop(self) -> None:
         self.loop = asyncio.new_event_loop()
@@ -1328,6 +1349,27 @@ class GrowCubeManager:
             return json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return fallback
+
+    @staticmethod
+    def _option_devices(options: Any) -> list[dict[str, Any]]:
+        if not isinstance(options, dict) or not isinstance(options.get("devices"), list):
+            return []
+
+        devices: list[dict[str, Any]] = []
+        for item in options["devices"]:
+            if not isinstance(item, dict):
+                continue
+            host = str(item.get("host") or "").strip()
+            if not host:
+                continue
+            devices.append(
+                {
+                    "name": str(item.get("name") or host).strip(),
+                    "host": host,
+                    "port": max(1, min(65535, int(item.get("port") or 8800))),
+                }
+            )
+        return devices
 
     @staticmethod
     def _state_from_dict(item: dict[str, Any]) -> DeviceState:

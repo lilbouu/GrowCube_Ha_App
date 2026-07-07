@@ -50,10 +50,11 @@ Publish this folder as a GitHub repository, then in Home Assistant OS:
 3. Paste the GitHub repository URL for this project.
 4. Find **GrowCube** in the add-on store.
 5. Install it.
-6. Configure MQTT credentials if your broker requires them.
+6. Configure MQTT and, optionally, static GrowCube devices.
 7. Start it.
 8. Open the add-on Web UI and add GrowCube devices from **Settings -> Discover**
-   or **Settings -> Manual add**.
+   or **Settings -> Manual add**, unless you already configured them in the
+   add-on options.
 
 The add-on connects directly to each device. It does not require the Home
 Assistant GrowCube custom integration to be installed.
@@ -61,9 +62,8 @@ Assistant GrowCube custom integration to be installed.
 MQTT must be available in Home Assistant. The default configuration expects the
 official Mosquitto broker add-on at `core-mosquitto`.
 
-If the add-on log shows `MQTT connection failed: not authorized (0005)`, create
-or choose a Home Assistant user for MQTT access and set those credentials in the
-GrowCube add-on configuration:
+Configure MQTT in the GrowCube add-on options. If your broker does not require
+credentials, leave `mqtt_username` and `mqtt_password` empty.
 
 ```yaml
 mqtt_host: core-mosquitto
@@ -72,16 +72,37 @@ mqtt_username: growcube_mqtt
 mqtt_password: your-password
 ```
 
+You can also preconfigure GrowCube devices in the same add-on options. The
+GrowCube TCP port defaults to `8800`; in normal setups you only need to fill in
+the name and IP address.
+
+```yaml
+mqtt_host: core-mosquitto
+mqtt_port: 1883
+mqtt_username: growcube_mqtt
+mqtt_password: your-password
+devices:
+  - name: Kitchen GrowCube
+    host: 192.168.1.50
+    port: 8800
+```
+
+If the add-on log shows `MQTT connection failed: not authorized (0005)`, create
+or choose a Home Assistant user for MQTT access and set those credentials in the
+GrowCube add-on configuration.
+
 ## Usage Option 1: Built-in Web UI
 
-This is the recommended setup path.
+This is the simplest setup path and does not require creating a Home Assistant
+dashboard.
 
 1. Open the **GrowCube** add-on.
 2. Open **Web UI**.
 3. Click the settings gear.
-4. Use **Discover -> Search network** to find GrowCube devices automatically, or
-   use **Manual add** if you already know the device IP address.
-5. Add the device.
+4. Use **Discover -> Search network** to find GrowCube devices automatically,
+   use **Manual add** if you already know the device IP address, or configure
+   devices in the add-on options.
+5. Add the device if it was not configured already.
 6. Use the dashboard in the Web UI to configure plants, manual watering,
    timed/smart watering, tank state, and history.
 
@@ -89,10 +110,18 @@ The Web UI does not need Home Assistant entities to exist first. It calls the
 add-on ingress API, and the add-on sends commands directly to the GrowCube over
 TCP `8800`.
 
-## Usage Option 2: Home Assistant Dashboard YAML
+## Usage Option 2: Home Assistant Dashboard
 
-If you want a Home Assistant dashboard made from MQTT-discovered entities, use
-the Lovelace card and dashboard YAML.
+If you want a native Home Assistant dashboard made from MQTT-discovered
+entities, use the Lovelace card and the ready-to-paste dashboard YAML.
+
+Before creating the dashboard:
+
+1. Configure MQTT in the add-on options.
+2. Add at least one GrowCube device from the Web UI or through the add-on
+   `devices` option.
+3. Start or restart the add-on.
+4. Wait for Home Assistant to discover the GrowCube MQTT entities.
 
 The add-on copies its Lovelace card to:
 
@@ -104,13 +133,13 @@ The GrowCube add-on log should contain:
 
 ```text
 GrowCube Lovelace card copied to /config/www/growcube/growcube-card.js
-GrowCube Lovelace card copied to /config/www/growcube/growcube-card-0.2.60.js
+GrowCube Lovelace card copied to /config/www/growcube/growcube-card-0.2.72-addon-compat.js
 ```
 
 Home Assistant serves that file as:
 
 ```text
-/local/growcube/growcube-card-0.2.60.js
+/local/growcube/growcube-card-0.2.72-addon-compat.js
 ```
 
 Add it as a Lovelace resource:
@@ -120,56 +149,18 @@ Add it as a Lovelace resource:
 3. Add a JavaScript module resource:
 
 ```text
-/local/growcube/growcube-card-0.2.60.js
+/local/growcube/growcube-card-0.2.72-addon-compat.js
 ```
 
-Then create or edit a dashboard and add a manual card:
+Use the ready-to-paste dashboard YAML:
+[docs/lovelace-growcube-mqtt-dashboard.yaml](docs/lovelace-growcube-mqtt-dashboard.yaml)
 
-```yaml
-type: custom:growcube-card
-title: GrowCube
-overview: dashboard
-```
-
-You can also import the portable dashboard YAML from:
-
-```text
-docs/lovelace-growcube-mqtt-dashboard.yaml
-```
+That file contains the overview page and four plant detail pages. It is designed
+to be copied into a Home Assistant dashboard YAML editor.
 
 The dashboard/card uses the MQTT entities published by this add-on. Add devices
-from the Web UI first so the add-on can connect to the cubes and publish MQTT
-Discovery.
-
-The card auto-detects the MQTT entities created by this add-on. If multiple
-GrowCube devices are present, pass the sanitized device host explicitly:
-
-```yaml
-type: custom:growcube-card
-title: GrowCube Office
-device: 192_168_1_50
-```
-
-Plant search, dashboard metadata, and detailed history use the add-on ingress
-API automatically. The add-on injects its current ingress URL into the copied
-card at startup, so a normal install does not need an `addon_api_url` setting.
-
-If Home Assistant generated unexpected entity IDs, pass them explicitly:
-
-```yaml
-type: custom:growcube-card
-title: GrowCube
-entities:
-  temperature: sensor.growcube_temperature
-  humidity: sensor.growcube_humidity
-  connected: binary_sensor.growcube_connected
-  water_warning: binary_sensor.growcube_water_warning
-  moisture_a: sensor.growcube_moisture_a
-  pump_a: binary_sensor.growcube_pump_a
-  water_plant_a: button.growcube_water_plant_a
-  stop_watering_a: button.growcube_stop_watering_a
-  load_history_a: button.growcube_load_history_a
-```
+from the Web UI or the add-on `devices` option first so the add-on can connect
+to the cubes and publish MQTT Discovery.
 
 ## Repository Layout
 
@@ -191,25 +182,11 @@ docs/
   lovelace-growcube-mqtt-dashboard.yaml
 ```
 
-## Updating The Add-on
-
-Do not uninstall the add-on just to update it. Uninstalling can remove add-on
-data.
-
-After pushing a new version to GitHub:
-
-1. Open **Settings -> Add-ons -> Add-on Store**.
-2. Open the menu and reload repositories, or open the GrowCube add-on page and
-   use the available update/rebuild action.
-3. Restart the GrowCube add-on.
-
-The add-on configuration and stored state under `/data` should remain in place.
-
 ## Notes
 
 - Device state is stored in `/data/growcube_state.json` inside the add-on.
-- GrowCube devices are managed from the add-on Web UI, not from the add-on
-  configuration.
+- GrowCube devices can be managed from the add-on Web UI or preconfigured in
+  the add-on `devices` option.
 - The add-on publishes MQTT Discovery configs under `homeassistant/...`.
 - Runtime state is published under `growcube/<device>/state`.
 - MQTT commands are received under `growcube/<device>/+/set`.
