@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.74
+
+- Prefer runtime Home Assistant Supervisor ingress discovery for dashboard cards so plant search does not use a stale baked `/api/hassio_ingress/...` URL.
+- Retry add-on API calls once with a refreshed ingress URL when Home Assistant returns 401, 403, 404, or 503.
+
 ## 0.2.73
 
 - Make plant catalog search in Home Assistant dashboard cards load add-on dashboard metadata before falling back to custom-only results.
