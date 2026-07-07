@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.71-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.72-addon-compat";
 const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
@@ -5136,7 +5136,7 @@ class GrowcubeCard extends HTMLElement {
           pushItem({
             ts: timestamp,
             kind: "watering",
-            title: "Last watering",
+            title: "Watering",
             detail: channelLabel,
           });
         }
@@ -5149,7 +5149,16 @@ class GrowcubeCard extends HTMLElement {
   }
 
   _wateringActivityTitle(source) {
-    return "Last watering";
+    if (source === "manual") {
+      return "Manual watering";
+    }
+    if (source === "timed") {
+      return "Timed watering";
+    }
+    if (source === "smart") {
+      return "Smart watering";
+    }
+    return "Watering";
   }
 
   _wateringActivityDetail(channelLabel, event) {
