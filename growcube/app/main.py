@@ -25,6 +25,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from growcube_client import (
     Command,
@@ -1163,7 +1164,7 @@ class GrowCubeManager:
                             report.month,
                             report.day,
                             hour,
-                            tzinfo=timezone.utc,
+                            tzinfo=local_timezone(),
                         ).isoformat()
                     except ValueError:
                         continue
@@ -1174,7 +1175,7 @@ class GrowCubeManager:
                 channel.history = sorted(existing.values(), key=lambda item: item["timestamp"])[-24 * 30 :]
             elif isinstance(report, WateringRecordReport) and 0 <= report.channel < len(state.channels):
                 channel = state.channels[report.channel]
-                timestamp = report.timestamp.replace(tzinfo=timezone.utc).isoformat()
+                timestamp = report.timestamp.replace(tzinfo=local_timezone()).isoformat()
                 channel.last_watering = timestamp
                 if all(abs_iso_seconds(item.get("timestamp"), timestamp) > 30 for item in channel.watering_events):
                     channel.watering_events.append({"timestamp": timestamp, "amount_ml": None, "source": "last"})
@@ -1519,6 +1520,12 @@ def now_iso() -> str:
 
 
 def local_timezone():
+    tz_name = os.environ.get("TZ", "").strip()
+    if tz_name:
+        try:
+            return ZoneInfo(tz_name.removeprefix(":"))
+        except ZoneInfoNotFoundError:
+            pass
     return datetime.now().astimezone().tzinfo or timezone.utc
 
 
@@ -1575,7 +1582,7 @@ def datetime_from_growcube_local_epoch(epoch: int) -> datetime | None:
         utc_components.hour,
         utc_components.minute,
         utc_components.second,
-        tzinfo=datetime.now().astimezone().tzinfo,
+        tzinfo=local_timezone(),
     )
 
 
