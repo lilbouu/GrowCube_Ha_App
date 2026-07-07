@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.64-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.65-addon-compat";
 const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
@@ -1533,10 +1533,10 @@ class GrowcubeCard extends HTMLElement {
   }
 
   _setPlantWizardStep(step) {
-    if (Number(step) >= 3 && !this._availablePlantWizardChannels().includes(this._plantWizardChannel)) {
+    if (Number(step) >= this._plantWizardChannelStepIndex() && !this._availablePlantWizardChannels().includes(this._plantWizardChannel)) {
       this._plantWizardChannel = this._firstAvailableChannel();
     }
-    this._plantWizardStep = this._clamp(Number(step), 0, 6);
+    this._plantWizardStep = this._clamp(Number(step), 0, this._plantWizardLastStep());
     this._render();
   }
 
@@ -1544,16 +1544,32 @@ class GrowcubeCard extends HTMLElement {
     if (this._plantWizardStep === 0) {
       return Boolean(this._plantWizardSelected);
     }
-    if (this._plantWizardStep === 1) {
+    if (this._plantWizardCustom && this._plantWizardStep === 1) {
       return Boolean(this._plantWizardSelected) && this._plantWizardName.trim().length > 0;
     }
-    if (this._plantWizardStep === 3) {
+    if (this._plantWizardStep === this._plantWizardChannelStepIndex()) {
       return this._availablePlantWizardChannels().includes(this._plantWizardChannel);
     }
-    if (this._plantWizardStep === 4) {
+    if (this._plantWizardStep === this._plantWizardModeStepIndex()) {
       return this._plantWizardMode === "Smart" || this._plantWizardMode === "Repeating";
     }
     return true;
+  }
+
+  _plantWizardLastStep() {
+    return this._plantWizardCustom ? 6 : 5;
+  }
+
+  _plantWizardChannelStepIndex() {
+    return this._plantWizardCustom ? 3 : 2;
+  }
+
+  _plantWizardModeStepIndex() {
+    return this._plantWizardCustom ? 4 : 3;
+  }
+
+  _plantWizardSettingsStepIndex() {
+    return this._plantWizardCustom ? 5 : 4;
   }
 
   async _confirmWatering() {
@@ -3443,7 +3459,7 @@ class GrowcubeCard extends HTMLElement {
         .dialog-backdrop {
           position: fixed;
           inset: 0;
-          z-index: 10;
+          z-index: 1000;
           display: grid;
           place-items: center;
           padding: 20px;
@@ -3458,6 +3474,19 @@ class GrowcubeCard extends HTMLElement {
           padding: 18px;
           background: var(--ha-card-background, var(--card-background-color));
           box-shadow: var(--ha-card-box-shadow, 0 12px 28px rgba(0, 0, 0, 0.3));
+        }
+
+        .plant-wizard-dialog {
+          width: min(680px, calc(100vw - 40px));
+          display: grid;
+          grid-template-rows: auto auto minmax(0, 1fr) auto;
+          overflow: hidden;
+        }
+
+        .plant-wizard-dialog .wizard-step {
+          min-height: 0;
+          overflow: auto;
+          padding-right: 2px;
         }
 
         .edit-dialog {
@@ -3606,7 +3635,7 @@ class GrowcubeCard extends HTMLElement {
 
         .wizard-progress {
           display: grid;
-          grid-template-columns: repeat(7, 1fr);
+          grid-template-columns: repeat(2, 1fr);
           gap: 6px;
           margin: 14px 0 16px;
         }
@@ -3623,6 +3652,53 @@ class GrowcubeCard extends HTMLElement {
 
         .wizard-step {
           min-height: 0;
+        }
+
+        .range-stack {
+          display: grid;
+          gap: 16px;
+        }
+
+        .range-control {
+          display: grid;
+          gap: 12px;
+          padding: 14px;
+          border: 1px solid var(--divider-color);
+          border-radius: 8px;
+          background: color-mix(in srgb, var(--primary-text-color) 5%, transparent);
+        }
+
+        .range-head {
+          display: flex;
+          gap: 12px;
+          align-items: baseline;
+          justify-content: space-between;
+        }
+
+        .range-value {
+          color: var(--primary-text-color);
+          font-weight: 650;
+        }
+
+        .range-inputs {
+          display: grid;
+          gap: 10px;
+        }
+
+        .range-inputs label {
+          display: grid;
+          grid-template-columns: 42px minmax(0, 1fr);
+          gap: 10px;
+          align-items: center;
+          color: var(--secondary-text-color);
+          font-size: 13px;
+        }
+
+        input[type="range"] {
+          min-height: 24px;
+          padding: 0;
+          border: 0;
+          background: transparent;
         }
 
         .profile-panel {
@@ -5078,29 +5154,36 @@ class GrowcubeCard extends HTMLElement {
   }
 
   _plantWizardDialogTemplate() {
-    const titles = ["Find plant", "Name and photo", "Growing conditions", "Choose channel", "Watering mode", "Watering settings", "Review"];
+    const titles = this._plantWizardCustom
+      ? ["Find plant", "Name and photo", "Growing conditions", "Choose channel", "Watering mode", "Watering settings", "Review"]
+      : ["Find plant", "Plant details", "Choose channel", "Watering mode", "Watering settings", "Review"];
+    const steps = Array.from({ length: this._plantWizardLastStep() + 1 }, (_item, index) => index);
+    const channelStep = this._plantWizardChannelStepIndex();
+    const modeStep = this._plantWizardModeStepIndex();
+    const settingsStep = this._plantWizardSettingsStepIndex();
+    const lastStep = this._plantWizardLastStep();
     return `
       <div class="dialog-backdrop" data-action="close-plant-wizard">
-        <div class="dialog" role="dialog" aria-modal="true" aria-label="Add plant">
+        <div class="dialog plant-wizard-dialog" role="dialog" aria-modal="true" aria-label="Add plant">
           <div class="dialog-title">${titles[this._plantWizardStep] || "Add plant"}</div>
-          <div class="wizard-progress">
-            ${[0, 1, 2, 3, 4, 5, 6].map((step) => `<div class="wizard-dot ${step <= this._plantWizardStep ? "active" : ""}"></div>`).join("")}
+          <div class="wizard-progress" style="grid-template-columns: repeat(${steps.length}, 1fr)">
+            ${steps.map((step) => `<div class="wizard-dot ${step <= this._plantWizardStep ? "active" : ""}"></div>`).join("")}
           </div>
           <div class="wizard-step">
             ${this._plantWizardStep === 0 ? this._plantWizardSearchStep() : ""}
             ${this._plantWizardStep === 1 ? this._plantWizardDetailsStep() : ""}
-            ${this._plantWizardStep === 2 ? this._plantWizardConditionsStep() : ""}
-            ${this._plantWizardStep === 3 ? this._plantWizardChannelStep() : ""}
-            ${this._plantWizardStep === 4 ? this._plantWizardWateringModeStep() : ""}
-            ${this._plantWizardStep === 5 ? this._plantWizardWateringSettingsStep() : ""}
-            ${this._plantWizardStep === 6 ? this._plantWizardReviewStep() : ""}
+            ${this._plantWizardCustom && this._plantWizardStep === 2 ? this._plantWizardConditionsStep() : ""}
+            ${this._plantWizardStep === channelStep ? this._plantWizardChannelStep() : ""}
+            ${this._plantWizardStep === modeStep ? this._plantWizardWateringModeStep() : ""}
+            ${this._plantWizardStep === settingsStep ? this._plantWizardWateringSettingsStep() : ""}
+            ${this._plantWizardStep === lastStep ? this._plantWizardReviewStep() : ""}
           </div>
           <div class="dialog-actions">
             <button type="button" class="secondary" data-action="${this._plantWizardStep === 0 ? "close-plant-wizard-button" : "plant-wizard-back"}">
               ${this._plantWizardStep === 0 ? "Cancel" : "Back"}
             </button>
-            <button type="button" data-action="${this._plantWizardStep === 6 ? "confirm-add-plant" : "plant-wizard-next"}" ${this._canAdvancePlantWizard() ? "" : "disabled"}>
-              ${this._plantWizardStep === 6 ? "Add plant" : "Next"}
+            <button type="button" data-action="${this._plantWizardStep === lastStep ? "confirm-add-plant" : "plant-wizard-next"}" ${this._canAdvancePlantWizard() ? "" : "disabled"}>
+              ${this._plantWizardStep === lastStep ? "Add plant" : "Next"}
             </button>
           </div>
         </div>
@@ -5239,6 +5322,31 @@ class GrowcubeCard extends HTMLElement {
     const item = this._plantWizardSelected || {};
     const name = item.display_name || item.name || this._plantWizardName || "Unknown plant";
     const imageUrl = this._plantImageUrl(this._plantWizardPhotoUrl || this._catalogImageUrl(item));
+    if (!this._plantWizardCustom) {
+      const about = item.description || "No catalog description is available for this plant.";
+      return `
+        <div class="profile-panel">
+          <div class="profile-hero">
+            <div class="profile-photo">
+              ${imageUrl ? `<img src="${this._escape(imageUrl)}" alt="" referrerpolicy="no-referrer">` : '<ha-icon icon="mdi:flower"></ha-icon>'}
+            </div>
+            <div>
+              <div class="title">${this._escape(name)}</div>
+              <div class="subtitle">${this._escape(item.category || "Plant profile")}</div>
+            </div>
+          </div>
+          <div>
+            <div class="section-title">About</div>
+            <div class="profile-about">${this._escape(about)}</div>
+          </div>
+          <div class="profile-stats">
+            ${this._profileStatTemplate("Soil moisture", this._rangeText(item.moisture_min, item.moisture_max, "%"))}
+            ${this._profileStatTemplate("Temperature", this._rangeText(item.temp_min, item.temp_max, "°C"))}
+            ${this._profileStatTemplate("Air humidity", this._rangeText(item.air_humidity_min, item.air_humidity_max, "%"))}
+          </div>
+        </div>
+      `;
+    }
     return `
       <div class="profile-panel">
         <div class="profile-hero">
@@ -5264,40 +5372,42 @@ class GrowcubeCard extends HTMLElement {
             <input type="file" accept="image/jpeg,image/png,image/webp" data-action="plant-wizard-photo-file">
             <div class="label">${this._plantWizardPhotoUploading ? "Uploading photo..." : this._plantWizardPhotoFileName ? `Selected: ${this._escape(this._plantWizardPhotoFileName)}` : "JPEG, PNG, or WebP up to 1 MB"}</div>
           </label>
+          <label class="field wide">
+            <div class="label">Description</div>
+            <textarea data-action="plant-wizard-description" rows="5">${this._escape(this._plantWizardDescription || "")}</textarea>
+          </label>
         </div>
       </div>
     `;
   }
 
   _plantWizardConditionsStep() {
-    const about = this._plantWizardDescription || "";
     return `
-      <div class="grid">
-        <label class="field">
-          <div class="label">Minimum temperature, °C</div>
-          <input type="number" min="-50" max="100" step="1" data-action="plant-wizard-temp-min" value="${this._plantWizardTempMin}">
-        </label>
-        <label class="field">
-          <div class="label">Maximum temperature, °C</div>
-          <input type="number" min="-50" max="100" step="1" data-action="plant-wizard-temp-max" value="${this._plantWizardTempMax}">
-        </label>
-        <label class="field">
-          <div class="label">Minimum air humidity, %</div>
-          <input type="number" min="0" max="100" step="1" data-action="plant-wizard-air-humidity-min" value="${this._plantWizardAirHumidityMin}">
-        </label>
-        <label class="field">
-          <div class="label">Maximum air humidity, %</div>
-          <input type="number" min="0" max="100" step="1" data-action="plant-wizard-air-humidity-max" value="${this._plantWizardAirHumidityMax}">
-        </label>
-        <label class="field wide">
-          <div class="label">Description</div>
-          <textarea data-action="plant-wizard-description" rows="6">${this._escape(about)}</textarea>
-        </label>
+      <div class="range-stack">
+        ${this._rangeControlTemplate("Soil moisture", "plant-wizard-smart-min", "plant-wizard-smart-max", this._plantWizardSmartMin, this._plantWizardSmartMax, 1, 99, "%")}
+        ${this._rangeControlTemplate("Temperature", "plant-wizard-temp-min", "plant-wizard-temp-max", this._plantWizardTempMin, this._plantWizardTempMax, -50, 100, "°C")}
+        ${this._rangeControlTemplate("Air humidity", "plant-wizard-air-humidity-min", "plant-wizard-air-humidity-max", this._plantWizardAirHumidityMin, this._plantWizardAirHumidityMax, 0, 100, "%")}
       </div>
-      <div class="profile-stats">
-        ${this._profileStatTemplate("Temperature", this._rangeText(this._plantWizardTempMin, this._plantWizardTempMax, "°C"))}
-        ${this._profileStatTemplate("Air humidity", this._rangeText(this._plantWizardAirHumidityMin, this._plantWizardAirHumidityMax, "%"))}
-        ${this._profileStatTemplate("Soil moisture", this._rangeText(this._plantWizardSmartMin, this._plantWizardSmartMax, "%"))}
+    `;
+  }
+
+  _rangeControlTemplate(label, minAction, maxAction, minValue, maxValue, minLimit, maxLimit, unit) {
+    return `
+      <div class="range-control">
+        <div class="range-head">
+          <div class="section-title">${this._escape(label)}</div>
+          <div class="range-value">${this._escape(minValue)}-${this._escape(maxValue)}${this._escape(unit)}</div>
+        </div>
+        <div class="range-inputs">
+          <label>
+            <span>Min</span>
+            <input type="range" min="${minLimit}" max="${maxLimit - 1}" step="1" data-action="${minAction}" value="${this._escape(minValue)}">
+          </label>
+          <label>
+            <span>Max</span>
+            <input type="range" min="${minLimit + 1}" max="${maxLimit}" step="1" data-action="${maxAction}" value="${this._escape(maxValue)}">
+          </label>
+        </div>
       </div>
     `;
   }
@@ -6271,6 +6381,9 @@ class GrowcubeCard extends HTMLElement {
     if (wizardSmartMin) {
       wizardSmartMin.addEventListener("input", (event) => {
         this._plantWizardSmartMin = this._clamp(Number(event.target.value), 1, Math.max(1, this._plantWizardSmartMax - 1));
+        if (event.target.type === "range") {
+          this._render();
+        }
       });
       wizardSmartMin.addEventListener("click", (event) => event.stopPropagation());
     }
@@ -6279,6 +6392,9 @@ class GrowcubeCard extends HTMLElement {
     if (wizardSmartMax) {
       wizardSmartMax.addEventListener("input", (event) => {
         this._plantWizardSmartMax = this._clamp(Number(event.target.value), Math.min(99, this._plantWizardSmartMin + 1), 99);
+        if (event.target.type === "range") {
+          this._render();
+        }
       });
       wizardSmartMax.addEventListener("click", (event) => event.stopPropagation());
     }
@@ -6286,7 +6402,10 @@ class GrowcubeCard extends HTMLElement {
     const wizardTempMin = this.shadowRoot.querySelector('[data-action="plant-wizard-temp-min"]');
     if (wizardTempMin) {
       wizardTempMin.addEventListener("input", (event) => {
-        this._plantWizardTempMin = this._clamp(Number(event.target.value), -50, 100);
+        this._plantWizardTempMin = this._clamp(Number(event.target.value), -50, Math.max(-50, this._plantWizardTempMax - 1));
+        if (event.target.type === "range") {
+          this._render();
+        }
       });
       wizardTempMin.addEventListener("click", (event) => event.stopPropagation());
     }
@@ -6294,7 +6413,10 @@ class GrowcubeCard extends HTMLElement {
     const wizardTempMax = this.shadowRoot.querySelector('[data-action="plant-wizard-temp-max"]');
     if (wizardTempMax) {
       wizardTempMax.addEventListener("input", (event) => {
-        this._plantWizardTempMax = this._clamp(Number(event.target.value), -50, 100);
+        this._plantWizardTempMax = this._clamp(Number(event.target.value), Math.min(100, this._plantWizardTempMin + 1), 100);
+        if (event.target.type === "range") {
+          this._render();
+        }
       });
       wizardTempMax.addEventListener("click", (event) => event.stopPropagation());
     }
@@ -6302,7 +6424,10 @@ class GrowcubeCard extends HTMLElement {
     const wizardAirHumidityMin = this.shadowRoot.querySelector('[data-action="plant-wizard-air-humidity-min"]');
     if (wizardAirHumidityMin) {
       wizardAirHumidityMin.addEventListener("input", (event) => {
-        this._plantWizardAirHumidityMin = this._clamp(Number(event.target.value), 0, 100);
+        this._plantWizardAirHumidityMin = this._clamp(Number(event.target.value), 0, Math.max(0, this._plantWizardAirHumidityMax - 1));
+        if (event.target.type === "range") {
+          this._render();
+        }
       });
       wizardAirHumidityMin.addEventListener("click", (event) => event.stopPropagation());
     }
@@ -6310,7 +6435,10 @@ class GrowcubeCard extends HTMLElement {
     const wizardAirHumidityMax = this.shadowRoot.querySelector('[data-action="plant-wizard-air-humidity-max"]');
     if (wizardAirHumidityMax) {
       wizardAirHumidityMax.addEventListener("input", (event) => {
-        this._plantWizardAirHumidityMax = this._clamp(Number(event.target.value), 0, 100);
+        this._plantWizardAirHumidityMax = this._clamp(Number(event.target.value), Math.min(100, this._plantWizardAirHumidityMin + 1), 100);
+        if (event.target.type === "range") {
+          this._render();
+        }
       });
       wizardAirHumidityMax.addEventListener("click", (event) => event.stopPropagation());
     }

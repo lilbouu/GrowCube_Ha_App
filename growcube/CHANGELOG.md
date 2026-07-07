@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.65
+
+- Restore the short catalog plant add flow while keeping the extended name, photo, description, and growing conditions flow only for custom plants.
+- Improve the add-plant dialog layout and use sliders for custom plant moisture, temperature, and air humidity ranges.
+
 ## 0.2.64
 
 - Redesign the custom plant flow as a step-by-step wizard: choose catalog/custom, set name and photo, set growing conditions, choose channel, then configure watering.
