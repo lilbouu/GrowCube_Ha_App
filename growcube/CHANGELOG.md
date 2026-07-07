@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.71
+
+- Refresh standalone Web UI dashboard card state immediately after device add/remove and service calls.
+- Stop carrying old plant metadata and cached photos forward when a dashboard channel is explicitly unconfigured.
+- Clear backend channel state immediately after reset plant commands so deleted plants disappear without a page reload.
+
+## 0.2.70
+
+- Show Recent activity watering entries as Last watering instead of Timed, Smart, or Manual watering.
+- Store protocol watering history records with a neutral source because the GrowCube history payload contains event time, not the watering mode that caused it.
+
+## 0.2.69
+
+- Skip the transient unconfigured plant setup screen after adding a plant by honoring optimistic channel metadata immediately.
+- Navigate to the newly added plant detail page before rendering the success toast and background dashboard refresh.
+
 ## 0.2.68
 
 - Keep uploaded Home Assistant ingress plant photo URLs on their original HTTP scheme so local photos render after upload.

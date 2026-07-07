@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.68-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.71-addon-compat";
 const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
@@ -99,7 +99,7 @@ class GrowcubeCard extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
-    if (this._plantWizardOpen || this._customPlantsOpen || this._editDialog || this._modeWizardOpen) {
+    if (this._hasActiveInputDialog()) {
       return;
     }
     this._render();
@@ -153,6 +153,24 @@ class GrowcubeCard extends HTMLElement {
       configured: values.configured ?? record.channels[channel]?.configured ?? true,
     };
     this._rememberPlantPhotoUrl(record.device_id, channel, record.channels[channel].image_url || record.channels[channel].photo_url);
+  }
+
+  _clearOptimisticChannelMetadata(channel = this._channelKey(), deviceId = this._selectedDeviceId()) {
+    const record = this._deviceRecord(deviceId);
+    if (!record?.channels?.[channel]) {
+      this._forgetPlantPhotoUrl(deviceId || record?.device_id, channel);
+      return;
+    }
+    const previous = record.channels[channel] || {};
+    record.channels[channel] = {
+      ...previous,
+      plant_name: "",
+      photo_url: "",
+      photo_url_value: "",
+      image_url: "",
+      configured: false,
+    };
+    this._forgetPlantPhotoUrl(record.device_id || deviceId, channel);
   }
 
   _deviceRecords() {
@@ -246,6 +264,7 @@ class GrowcubeCard extends HTMLElement {
     const started = performance.now();
     const response = await fetch(url, {
       credentials: "same-origin",
+      cache: "no-store",
       headers: {
         "Accept": "application/json",
       },
@@ -495,6 +514,21 @@ class GrowcubeCard extends HTMLElement {
       this._channels().forEach((channel) => {
         const nextChannel = channels[channel] || {};
         const previousChannel = previous.channels?.[channel] || {};
+        const hasConfigured = Object.prototype.hasOwnProperty.call(nextChannel, "configured");
+        const configured = hasConfigured ? Boolean(nextChannel.configured) : previousChannel.configured;
+        if (hasConfigured && !configured) {
+          channels[channel] = {
+            ...nextChannel,
+            plant_name: "",
+            photo_url: "",
+            photo_url_value: "",
+            image_url: "",
+            photo_url_entity: nextChannel.photo_url_entity || previousChannel.photo_url_entity || "",
+            configured: false,
+          };
+          this._forgetPlantPhotoUrl(device?.device_id, channel);
+          return;
+        }
         channels[channel] = {
           ...nextChannel,
           plant_name: nextChannel.plant_name || previousChannel.plant_name || "",
@@ -502,7 +536,7 @@ class GrowcubeCard extends HTMLElement {
           photo_url_value: nextChannel.photo_url_value || previousChannel.photo_url_value || "",
           image_url: nextChannel.image_url || previousChannel.image_url || nextChannel.photo_url || previousChannel.photo_url || "",
           photo_url_entity: nextChannel.photo_url_entity || previousChannel.photo_url_entity || "",
-          configured: nextChannel.configured ?? previousChannel.configured,
+          configured,
         };
         this._rememberPlantPhotoUrl(device?.device_id, channel, channels[channel].image_url || channels[channel].photo_url);
       });
@@ -697,6 +731,7 @@ class GrowcubeCard extends HTMLElement {
         `_plant_${channel}_configured`,
         `_plant_configured_${channel}`,
       ]),
+      configured: mappedChannelEntities.configured,
       moisture: mappedChannelEntities.moisture || moisture,
       last_watering: mappedChannelEntities.last_watering || this._entityBySuffix("sensor", `_last_watering_${channel}`),
       next_watering: mappedChannelEntities.next_watering || this._entityBySuffix("sensor", `_next_watering_${channel}`),
@@ -1299,6 +1334,16 @@ class GrowcubeCard extends HTMLElement {
   }
 
   _isPlantConfigured(entities, missingFallback = true) {
+    if (typeof entities?.configured === "boolean") {
+      return entities.configured;
+    }
+    const mappedConfigured = String(entities?.configured ?? "").trim().toLowerCase();
+    if (["true", "on", "1", "yes"].includes(mappedConfigured)) {
+      return true;
+    }
+    if (["false", "off", "0", "no"].includes(mappedConfigured)) {
+      return false;
+    }
     const configured = this._state(entities.plant_configured);
     if (!configured) {
       return missingFallback;
@@ -1367,6 +1412,10 @@ class GrowcubeCard extends HTMLElement {
       || this._modeWizardOpen
       || this._wateringOpen
       || this._reservoirOpen
+      || this._reservoirGuideOpen
+      || this._customPlantsOpen
+      || this._deletePlantDialogOpen
+      || this._aboutDialogOpen
     );
   }
 
@@ -1711,9 +1760,9 @@ class GrowcubeCard extends HTMLElement {
           configured: apiResult.configured ?? values.configured,
         });
         this._dashboardDevicesLoadedAt = 0;
+        this._navigateToChannel(channel);
         this._loadDashboardDevicesIfNeeded(true);
         this._showToast("Plant added");
-        this._navigateToChannel(channel);
         this._render();
         return;
       }
@@ -1758,9 +1807,9 @@ class GrowcubeCard extends HTMLElement {
       this._rememberCustomPlantProfileFromWizard();
       this._applyOptimisticChannelMetadata(channel, values);
       this._dashboardDevicesLoadedAt = 0;
+      this._navigateToChannel(channel);
       this._loadDashboardDevicesIfNeeded(true);
       this._showToast("Plant added");
-      this._navigateToChannel(channel);
       this._render();
     } catch (error) {
       this._showError(error?.message || "Could not add plant");
@@ -2220,6 +2269,14 @@ class GrowcubeCard extends HTMLElement {
     }
     try {
       window.localStorage?.setItem(this._plantPhotoCacheKey(deviceId, channel), url);
+    } catch (error) {
+      // Browser storage can be unavailable in some Home Assistant webviews.
+    }
+  }
+
+  _forgetPlantPhotoUrl(deviceId, channel) {
+    try {
+      window.localStorage?.removeItem(this._plantPhotoCacheKey(deviceId, channel));
     } catch (error) {
       // Browser storage can be unavailable in some Home Assistant webviews.
     }
@@ -3549,6 +3606,14 @@ class GrowcubeCard extends HTMLElement {
           font: inherit;
           color: var(--primary-text-color);
           background: color-mix(in srgb, var(--primary-text-color) 6%, transparent);
+        }
+
+        input:focus,
+        select:focus,
+        textarea:focus {
+          outline: none;
+          border-color: var(--primary-color);
+          box-shadow: inset 0 0 0 1px var(--primary-color);
         }
 
         textarea {
@@ -5082,15 +5147,6 @@ class GrowcubeCard extends HTMLElement {
   }
 
   _wateringActivityTitle(source) {
-    if (source === "manual") {
-      return "Manual watering";
-    }
-    if (source === "timed") {
-      return "Timed watering";
-    }
-    if (source === "smart") {
-      return "Smart watering";
-    }
     return "Last watering";
   }
 
@@ -5994,9 +6050,14 @@ class GrowcubeCard extends HTMLElement {
 
   async _confirmDeletePlant() {
     try {
+      const channel = this._channelKey();
+      const deviceId = this._selectedDeviceId();
       await this._press(this._entities().reset);
       this._deletePlantDialogOpen = false;
       this._aboutDialogOpen = false;
+      this._clearOptimisticChannelMetadata(channel, deviceId);
+      this._dashboardDevicesLoadedAt = 0;
+      this._loadDashboardDevicesIfNeeded(true);
       this._showToast("Plant deleted");
       const path = this._detailBackPath();
       window.history.pushState(null, "", path);

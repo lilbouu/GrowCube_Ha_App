@@ -579,6 +579,17 @@ class GrowCubeManager:
         await runtime.client.send(Command(47, f"{channel}@0"))
         await runtime.client.send(Command(45, f"{channel}"))
         await runtime.client.send(Command(46, f"{channel}"))
+        channel_state = self.devices[device_id].channels[channel]
+        channel_state.last_watering = None
+        channel_state.next_watering = None
+        channel_state.plant_configured = False
+        channel_state.history_loading = False
+        channel_state.history_complete = False
+        channel_state.watering_events_complete = False
+        channel_state.history.clear()
+        channel_state.watering_events.clear()
+        channel_state.config = ChannelConfig()
+        self.touch_locked(self.devices[device_id])
 
     async def apply_watering_config(self, device_id: str, channel: int) -> None:
         runtime = self.runtimes.get(device_id)
@@ -1166,8 +1177,7 @@ class GrowCubeManager:
                 timestamp = report.timestamp.replace(tzinfo=local_timezone()).isoformat()
                 channel.last_watering = timestamp
                 if all(abs_iso_seconds(item.get("timestamp"), timestamp) > 30 for item in channel.watering_events):
-                    source = "timed" if channel.config.mode == "Repeating" else "smart" if channel.config.mode == "Smart" else "last"
-                    channel.watering_events.append({"timestamp": timestamp, "amount_ml": None, "source": source})
+                    channel.watering_events.append({"timestamp": timestamp, "amount_ml": None, "source": "last"})
                     channel.watering_events = sorted(
                         channel.watering_events,
                         key=lambda item: item["timestamp"],
@@ -2041,8 +2051,20 @@ async function callService(domain, service, data = {}) {
   await refreshDashboard(true);
 }
 
+function syncDashboardCardDevices() {
+  if (!dashboardCard._mergeDashboardDeviceMetadata) {
+    return;
+  }
+  dashboardCard._dashboardDevices = dashboardCard._mergeDashboardDeviceMetadata(
+    dashboardPayload.devices || [],
+    dashboardCard._dashboardDevices || [],
+  );
+  dashboardCard._dashboardDevicesLoadedAt = Date.now();
+}
+
 function updateDashboardCard() {
   const states = mergeStates(dashboardPayload);
+  syncDashboardCardDevices();
   dashboardCard.hass = {
     states,
     callService,
@@ -2120,13 +2142,13 @@ async function refreshDevices() {
 async function addDevice(host, name) {
   const params = new URLSearchParams({host, name: name || host});
   await fetchJson("devices/add?" + params.toString());
-  await refreshDevices();
+  await refreshDashboard(true);
 }
 
 async function removeDevice(deviceId) {
   const params = new URLSearchParams({device_id: deviceId});
   await fetchJson("devices/remove?" + params.toString());
-  await refreshDevices();
+  await refreshDashboard(true);
 }
 
 async function discoverDevices() {
