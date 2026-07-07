@@ -31,6 +31,7 @@ from growcube_client import (
     Command,
     DelayedTimedWateringStateReport,
     DeviceVersionReport,
+    ExtendedWateringRecordReport,
     GrowCubeClient,
     HistoryCompleteReport,
     LockStateReport,
@@ -77,6 +78,7 @@ CHANNEL_NAMES = ("A", "B", "C", "D")
 GROWCUBE_TANK_CAPACITY_ML = 1500
 GROWCUBE_TANK_UNUSABLE_RESERVE_ML = 300
 RECONNECT_DELAY_SECONDS = 10
+CONNECTION_NOTIFICATION_GRACE_SECONDS = 20
 WATERING_APPLY_DELAY_SECONDS = 0.75
 DISCOVERY_PORT_TIMEOUT_SECONDS = 0.35
 DISCOVERY_DEVICE_TIMEOUT_SECONDS = 8
@@ -142,6 +144,7 @@ class DeviceState:
     connected: bool = False
     connecting: bool = False
     error: str = ""
+    connection_problem_since: str | None = None
     device_id: str | None = None
     version: str | None = None
     temperature: int | None = None
@@ -194,6 +197,8 @@ class DeviceRuntime:
                     self.state.connected = False
                     self.state.connecting = False
                     self.state.error = error
+                    if self.state.connection_problem_since is None:
+                        self.state.connection_problem_since = now_iso()
                     self.manager.touch_locked(self.state)
                 if schedule_retry:
                     self.schedule_reconnect()
@@ -1072,6 +1077,7 @@ class GrowCubeManager:
             state.connected = True
             state.connecting = False
             state.error = ""
+            state.connection_problem_since = None
             self.touch_locked(state)
 
     async def handle_disconnected(self, device_id: str) -> None:
@@ -1081,6 +1087,8 @@ class GrowCubeManager:
                 return
             state.connected = False
             state.connecting = False
+            if state.connection_problem_since is None:
+                state.connection_problem_since = now_iso()
             self.touch_locked(state)
         runtime = self.runtimes.get(device_id)
         if runtime is not None:
@@ -1183,6 +1191,24 @@ class GrowCubeManager:
                         channel.watering_events,
                         key=lambda item: item["timestamp"],
                     )[-128:]
+            elif isinstance(report, ExtendedWateringRecordReport) and 0 <= report.channel < len(state.channels):
+                channel = state.channels[report.channel]
+                timestamp = report.timestamp.replace(tzinfo=local_timezone()).isoformat()
+                channel.last_watering = timestamp
+                for item in channel.watering_events:
+                    if abs_iso_seconds(item.get("timestamp"), timestamp) <= 30:
+                        item["source"] = report.source
+                        if "amount_ml" not in item:
+                            item["amount_ml"] = None
+                        break
+                else:
+                    channel.watering_events.append(
+                        {"timestamp": timestamp, "amount_ml": None, "source": report.source}
+                    )
+                channel.watering_events = sorted(
+                    channel.watering_events,
+                    key=lambda item: item["timestamp"],
+                )[-128:]
             elif isinstance(report, HistoryCompleteReport) and 0 <= report.channel < len(state.channels):
                 channel = state.channels[report.channel]
                 if report.history_kind == "moisture":
@@ -1359,6 +1385,7 @@ class GrowCubeManager:
             name=str(item.get("name") or item.get("host") or "GrowCube"),
             host=str(item.get("host") or ""),
             port=max(1, min(65535, int(item.get("port") or 8800))),
+            connection_problem_since=item.get("connection_problem_since"),
             device_id=item.get("device_id"),
             version=item.get("version"),
             temperature=optional_int(item.get("temperature")),
@@ -1387,6 +1414,7 @@ class GrowCubeManager:
             "connected": state.connected,
             "connecting": state.connecting,
             "error": state.error,
+            "connection_problem_since": state.connection_problem_since,
             "device_id": state.device_id,
             "version": state.version,
             "addon_api_url": cached_supervisor_ingress_url(),
@@ -2978,7 +3006,9 @@ def normalize_ingress_url(value: Any) -> str:
 def notification_signature(device: dict[str, Any]) -> tuple[str, ...]:
     parts: list[str] = []
     if not device.get("connected") and not device.get("connecting"):
-        parts.append("connection")
+        problem_since = parse_iso_datetime(device.get("connection_problem_since"))
+        if problem_since is not None and datetime.now(timezone.utc) - problem_since >= timedelta(seconds=CONNECTION_NOTIFICATION_GRACE_SECONDS):
+            parts.append("connection")
     if device.get("water_warning"):
         parts.append("water_warning")
     if device.get("device_locked"):

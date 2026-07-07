@@ -60,7 +60,7 @@ class GrowcubeCard extends HTMLElement {
     this._historyLoading = false;
     this._historyError = "";
     this._historyLoadedAt = 0;
-    this._historyWindowHours = 168;
+    this._historyWindowHours = 72;
     this._cubeHistoryRequestedAt = {};
     this._cubeHistory = {};
     this._cubeHistoryLoading = {};
@@ -93,7 +93,7 @@ class GrowcubeCard extends HTMLElement {
       ...config,
       entities: config.entities || {},
     };
-    this._historyWindowHours = this._clamp(Number(config.hours_to_show) || this._historyWindowHours || 168, 1, 168);
+    this._historyWindowHours = this._clamp(Number(config.hours_to_show) || this._historyWindowHours || 72, 1, 168);
     this._render();
   }
 
@@ -3170,8 +3170,9 @@ class GrowcubeCard extends HTMLElement {
         .icon-button {
           width: 40px;
           height: 40px;
-          border: 1px solid var(--divider-color);
-          border-radius: 999px;
+          min-width: 40px;
+          border: 0;
+          border-radius: 50%;
           display: flex;
           align-items: center;
           justify-content: center;
@@ -3183,7 +3184,7 @@ class GrowcubeCard extends HTMLElement {
 
         .icon-button:hover {
           color: var(--primary-text-color);
-          border-color: color-mix(in srgb, var(--primary-color) 36%, var(--divider-color));
+          background: color-mix(in srgb, var(--primary-color) 12%, transparent);
         }
 
         .icon-button ha-icon {
@@ -3978,6 +3979,7 @@ class GrowcubeCard extends HTMLElement {
         .profile-about {
           max-height: 260px;
           overflow: auto;
+          margin-top: 8px;
           padding: 14px;
           border: 1px solid var(--divider-color);
           border-radius: 8px;
@@ -4561,7 +4563,7 @@ class GrowcubeCard extends HTMLElement {
       const cardConfig = {
         type: "history-graph",
         title: host.dataset.title || this._config.name || `${this._plantName()} moisture`,
-        hours_to_show: this._clamp(Number(this._config.hours_to_show) || 24, 1, 168),
+        hours_to_show: this._clamp(Number(this._config.hours_to_show) || 72, 1, 168),
         entities: [
           {
             entity: entities.moisture,

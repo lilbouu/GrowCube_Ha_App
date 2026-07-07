@@ -19,6 +19,11 @@ from growcube_protocol import (
 
 GROWCUBE_PORT = 8800
 LOGGER = logging.getLogger("growcube-addon.client")
+WATERING_SOURCE_BY_CODE = {
+    1: "smart",
+    2: "timed",
+    3: "manual",
+}
 
 
 class Channel(IntEnum):
@@ -98,6 +103,13 @@ class MoistureHistoryReport(Report):
 class WateringRecordReport(Report):
     channel: int
     timestamp: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ExtendedWateringRecordReport(Report):
+    channel: int
+    timestamp: datetime
+    source: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,6 +231,7 @@ class GrowCubeClient:
 
     async def request_history(self, channel: int) -> None:
         await self.send(Command(48, channel_payload(channel)))
+        await self.send(Command(56, channel_payload(channel)))
 
     async def open_pump(self, channel: int) -> None:
         await self.send(Command(47, manual_watering_payload(channel, True)))
@@ -292,6 +305,16 @@ def report_from_message(command: int, payload: str, raw: str) -> Report:
                     raw,
                     channel=parts[0],
                     timestamp=datetime(parts[1], parts[2], parts[3], parts[4], parts[5]),
+                )
+        if command == 56:
+            parts = _split_ints(payload)
+            if len(parts) == 7:
+                return ExtendedWateringRecordReport(
+                    command,
+                    raw,
+                    channel=parts[0],
+                    timestamp=datetime(parts[1], parts[2], parts[3], parts[4], parts[5]),
+                    source=WATERING_SOURCE_BY_CODE.get(parts[6], "last"),
                 )
         if command == 24:
             fields = payload.split("@")
