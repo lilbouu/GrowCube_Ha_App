@@ -5151,9 +5151,7 @@ class GrowcubeCard extends HTMLElement {
   }
 
   _wateringActivityDetail(channelLabel, event) {
-    const amount = typeof event === "string" ? undefined : event?.amount_ml;
-    const amountText = Number(amount) > 0 ? ` · ${Number(amount)} mL` : "";
-    return `${channelLabel}${amountText}`;
+    return channelLabel;
   }
 
   _activityFeedTemplate() {

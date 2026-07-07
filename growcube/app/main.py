@@ -1163,7 +1163,7 @@ class GrowCubeManager:
                             report.month,
                             report.day,
                             hour,
-                            tzinfo=local_timezone(),
+                            tzinfo=timezone.utc,
                         ).isoformat()
                     except ValueError:
                         continue
@@ -1174,7 +1174,7 @@ class GrowCubeManager:
                 channel.history = sorted(existing.values(), key=lambda item: item["timestamp"])[-24 * 30 :]
             elif isinstance(report, WateringRecordReport) and 0 <= report.channel < len(state.channels):
                 channel = state.channels[report.channel]
-                timestamp = report.timestamp.replace(tzinfo=local_timezone()).isoformat()
+                timestamp = report.timestamp.replace(tzinfo=timezone.utc).isoformat()
                 channel.last_watering = timestamp
                 if all(abs_iso_seconds(item.get("timestamp"), timestamp) > 30 for item in channel.watering_events):
                     channel.watering_events.append({"timestamp": timestamp, "amount_ml": None, "source": "last"})
