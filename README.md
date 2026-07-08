@@ -1,4 +1,4 @@
-# GrowCube HAOS Add-on
+# GrowCube HAOS Add-on (V. 1.0)
 
 Home Assistant OS add-on backend for GrowCube devices.
 
