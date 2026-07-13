@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.82
+
+- Clear the HA channel plant profile and cached plant history when GrowCube reports `plant_id=0` after deletion from Android.
+
+## 0.2.81
+
+- Send complete plant profiles through `POST /channel/config` so long descriptions cannot exceed ingress URL limits.
+- Prevent catalog plants from falling back to a watering update with `plant_id=0` when the add-on API fails.
+- Verify that the saved catalog plant ID matches the selected plant before reporting success.
+
+## 0.2.78
+
+- Format GrowCube card dates in English regardless of the browser or Home Assistant locale.
+
+## 0.2.77
+
+- Proxy GrowCube catalog images through the add-on API in both Web UI and Home Assistant dashboard cards, including `www.growcube.cc` image URLs, so paged plant search results load images reliably.
+
 ## 0.2.76
 
 - Allow the direct dashboard API on port `8099` from private LAN clients by default so Home Assistant dashboard cards can search the plant catalog without relying on rotating ingress tokens.

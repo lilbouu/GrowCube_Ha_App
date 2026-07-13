@@ -77,6 +77,7 @@ CLOUD_CATALOG_HOSTS = ("https://api.growcube.cc", "http://api.growcube.cc")
 CLOUD_CATALOG_LIMIT = 40
 CLOUD_CATALOG_TIMEOUT_SECONDS = 20
 _PLANT_SEARCH_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_PLANT_ID_CACHE: dict[int, tuple[float, dict[str, Any] | None]] = {}
 PLANT_SEARCH_CACHE_TTL_SECONDS = 15 * 60
 _SUPERVISOR_INGRESS_URL_CACHE: str | None = None
 CARD_TARGET_PATHS = (
@@ -103,6 +104,7 @@ HISTORY_TRAILING_GAP_HOURS = 0
 @dataclass(slots=True)
 class ChannelConfig:
     configured: bool = False
+    plant_id: int = 0
     plant_name: str = ""
     photo_url: str = ""
     type_category: str = ""
@@ -431,6 +433,7 @@ class GrowCubeManager:
             "device_id": mqtt_device_unique_id(self._state_to_dict(state)),
             "channel": "abcd"[channel],
             "configured": state.channels[channel].plant_configured and config.configured,
+            "plant_id": config.plant_id,
             "plant_name": config.plant_name,
             "photo_url": config.photo_url,
             "image_url": config.photo_url,
@@ -456,6 +459,7 @@ class GrowCubeManager:
         channels = {
             channel: {
                 **dashboard_channel_entities(device_id, channel),
+                "plant_id": state.channels[index].config.plant_id,
                 "plant_name": state.channels[index].config.plant_name,
                 "photo_url": state.channels[index].config.photo_url,
                 "photo_url_value": state.channels[index].config.photo_url,
@@ -614,6 +618,7 @@ class GrowCubeManager:
         await runtime.client.send(Command(47, f"{channel}@0"))
         await runtime.client.send(Command(45, f"{channel}"))
         await runtime.client.send(Command(46, f"{channel}"))
+        await runtime.client.send(Command(49, watering_mode_payload(channel, 0, 0, 0, 0)))
         channel_state = self.devices[device_id].channels[channel]
         channel_state.last_watering = None
         channel_state.next_watering = None
@@ -646,8 +651,13 @@ class GrowCubeManager:
                 interval,
                 start_time.isoformat(),
             )
-            await self._reset_watering_mode(runtime, channel)
-            await runtime.client.send(Command(51, scheduled_watering_payload(channel, duration, interval, start_time)))
+            await self._reset_watering_mode(runtime, channel, config.plant_id)
+            await runtime.client.send(
+                Command(49, watering_mode_payload(channel, 1, duration, interval, config.plant_id))
+            )
+            await runtime.client.send(
+                Command(51, scheduled_watering_payload(channel, duration, interval, start_time, config.plant_id))
+            )
         elif mode == "Smart":
             smart_mode = 3 if config.smart_daytime_watering else 2
             LOGGER.info(
@@ -659,7 +669,7 @@ class GrowCubeManager:
                 config.smart_max_moisture,
                 config.smart_daytime_watering,
             )
-            await self._reset_watering_mode(runtime, channel)
+            await self._reset_watering_mode(runtime, channel, config.plant_id)
             await runtime.client.send(
                 Command(
                     49,
@@ -668,12 +678,13 @@ class GrowCubeManager:
                         smart_mode,
                         config.smart_min_moisture,
                         config.smart_max_moisture,
+                        config.plant_id,
                     ),
                 )
             )
         else:
             LOGGER.info("Disable watering device=%s channel=%s", self.devices[device_id].host, CHANNEL_NAMES[channel])
-            await self._reset_watering_mode(runtime, channel)
+            await self._reset_watering_mode(runtime, channel, config.plant_id)
 
     async def discover_devices(self, network_value: str) -> list[dict[str, Any]]:
         networks = discovery_networks(network_value)
@@ -841,12 +852,47 @@ class GrowCubeManager:
         self.notification_signatures[device_id] = signature
         await asyncio.to_thread(sync_homeassistant_notifications, device, signature)
 
-    async def _reset_watering_mode(self, runtime: DeviceRuntime, channel: int) -> None:
+    async def restore_channel_plant_profile(self, device_id: str, channel_index: int, plant_id: int, force: bool = False) -> None:
+        if plant_id <= 0:
+            return
+        channel_name = CHANNEL_NAMES[channel_index] if 0 <= channel_index < len(CHANNEL_NAMES) else str(channel_index)
+        try:
+            plant = await asyncio.to_thread(fetch_plant_by_id, plant_id)
+        except Exception as err:
+            LOGGER.warning("Plant profile restore failed device=%s channel=%s plant_id=%s error=%s", device_id, channel_name, plant_id, err)
+            return
+        if not plant:
+            LOGGER.warning("Plant profile restore found no catalog plant device=%s channel=%s plant_id=%s", device_id, channel_name, plant_id)
+            return
+
+        async with self.async_lock:
+            state = self.devices.get(device_id)
+            if state is None or not (0 <= channel_index < len(state.channels)):
+                return
+            channel = state.channels[channel_index]
+            config = channel.config
+            if config.plant_id != plant_id:
+                return
+            changed = apply_catalog_plant_profile(config, plant, force=force)
+            if not changed:
+                return
+            channel.plant_configured = True
+            config.configured = True
+            LOGGER.info(
+                "Restored plant profile device=%s channel=%s plant_id=%s fields=%s",
+                state.host,
+                channel_name,
+                plant_id,
+                ",".join(changed),
+            )
+            self.touch_locked(state)
+
+    async def _reset_watering_mode(self, runtime: DeviceRuntime, channel: int, plant_id: int = 0) -> None:
         if runtime.client is None:
             return
         await runtime.client.send(Command(47, f"{channel}@0"))
         await runtime.client.send(Command(46, f"{channel}"))
-        await runtime.client.send(Command(49, watering_mode_payload(channel, 0, 0, 0)))
+        await runtime.client.send(Command(49, watering_mode_payload(channel, 0, 0, 0, plant_id)))
 
     async def configure_channel(
         self,
@@ -865,6 +911,9 @@ class GrowCubeManager:
             if query_has(params, "plant_name"):
                 config.plant_name = first_query_value(params, "plant_name")[:64]
                 changed.append(f"plant_name={config.plant_name!r}")
+            if query_has(params, "plant_id"):
+                config.plant_id = clamp_int(first_query_value(params, "plant_id"), 0, 2147483647, config.plant_id)
+                changed.append(f"plant_id={config.plant_id}")
             if query_has(params, "photo_url"):
                 config.photo_url = first_query_value(params, "photo_url")[:512]
                 changed.append("photo_url updated")
@@ -1286,7 +1335,30 @@ class GrowCubeManager:
                 )
             elif isinstance(report, DelayedTimedWateringStateReport) and 0 <= report.channel < len(state.channels):
                 channel = state.channels[report.channel]
-                if report.enabled and report.duration_seconds > 0 and report.interval_hours > 0:
+                restore_plant_id = 0
+                restore_force = False
+                if report.has_plant_id:
+                    previous_plant_id = channel.config.plant_id
+                    channel.config.plant_id = report.plant_id
+                    restore_plant_id = report.plant_id
+                    restore_force = previous_plant_id != report.plant_id
+                plant_removed = report.has_plant_id and report.plant_id == 0 and report.mode == 0
+                if plant_removed:
+                    channel.last_watering = None
+                    channel.next_watering = None
+                    channel.plant_configured = False
+                    channel.history_loading = False
+                    channel.history_complete = False
+                    channel.watering_events_complete = False
+                    channel.history.clear()
+                    channel.watering_events.clear()
+                    channel.config = ChannelConfig()
+                    LOGGER.info(
+                        "Plant removed from GrowCube device=%s channel=%s",
+                        state.host,
+                        CHANNEL_NAMES[report.channel],
+                    )
+                elif report.mode == 1 and report.duration_seconds > 0 and report.interval_hours > 0:
                     next_watering = datetime_from_growcube_local_epoch(report.next_start_epoch)
                     channel.next_watering = next_watering.isoformat() if next_watering is not None else None
                     channel.config.mode = "Repeating"
@@ -1305,11 +1377,34 @@ class GrowCubeManager:
                         report.interval_hours,
                         channel.next_watering,
                     )
+                elif report.mode in (2, 3) and 0 < report.smart_min_moisture < report.smart_max_moisture <= 100:
+                    channel.next_watering = None
+                    channel.config.mode = "Smart"
+                    channel.plant_configured = True
+                    channel.config.configured = True
+                    channel.config.smart_min_moisture = report.smart_min_moisture
+                    channel.config.smart_max_moisture = report.smart_max_moisture
+                    channel.config.smart_daytime_watering = report.mode == 3
+                    LOGGER.info(
+                        "Smart watering state device=%s channel=%s mode=%s min=%s max=%s",
+                        state.host,
+                        CHANNEL_NAMES[report.channel],
+                        report.mode,
+                        report.smart_min_moisture,
+                        report.smart_max_moisture,
+                    )
                 else:
                     channel.next_watering = None
-                    if channel.config.mode == "Repeating":
+                    if report.plant_id > 0:
+                        channel.plant_configured = True
+                        channel.config.configured = True
+                    if channel.config.mode in ("Repeating", "Smart"):
                         channel.config.mode = "Disabled"
-                    LOGGER.info("Timed watering state device=%s channel=%s disabled", state.host, CHANNEL_NAMES[report.channel])
+                    LOGGER.info("Automatic watering state device=%s channel=%s disabled", state.host, CHANNEL_NAMES[report.channel])
+                if restore_plant_id > 0:
+                    self.schedule_loop_task(
+                        self.restore_channel_plant_profile(device_id, report.channel, restore_plant_id, force=restore_force)
+                    )
 
             self.touch_locked(state)
 
@@ -1403,6 +1498,7 @@ class GrowCubeManager:
                     amount_ml = clamp_int(config.get("amount_ml"), 10, 500, 50)
                     channel.config = ChannelConfig(
                         configured=bool(config.get("configured", channel.plant_configured)),
+                        plant_id=clamp_int(config.get("plant_id"), 0, 2147483647, 0),
                         plant_name=str(config.get("plant_name") or ""),
                         photo_url=str(config.get("photo_url") or ""),
                         type_category=str(config.get("type_category") or ""),
@@ -1503,6 +1599,7 @@ class GrowCubeManager:
                     "watering_events": channel.watering_events,
                     "config": {
                         "configured": channel.config.configured,
+                        "plant_id": channel.config.plant_id,
                         "plant_name": channel.config.plant_name,
                         "photo_url": channel.config.photo_url,
                         "type_category": channel.config.type_category,
@@ -2337,7 +2434,7 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
-        LOGGER.info(
+        LOGGER.debug(
             "Ingress API request remote=%s path=%s query=%r",
             self.client_address[0],
             parsed.path,
@@ -2375,6 +2472,10 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
                 plants = search_plants(query)
                 LOGGER.info("Plant search finished query=%r results=%s", query, len(plants))
                 self._write_json({"plants": plants})
+            elif parsed.path == "/plants/id":
+                plant_id = clamp_int(first_query_value(params, "id"), 0, 2147483647, 0)
+                plant = fetch_plant_by_id(plant_id) if plant_id > 0 else None
+                self._write_json({"plant": plant})
             elif parsed.path == "/plants/image":
                 body, content_type = fetch_remote_image(first_query_value(params, "url"))
                 self._write_bytes(body, content_type)
@@ -2425,7 +2526,7 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
-        LOGGER.info(
+        LOGGER.debug(
             "Ingress API POST request remote=%s path=%s query=%r",
             self.client_address[0],
             parsed.path,
@@ -2439,6 +2540,20 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
             if parsed.path == "/plants/photo":
                 payload = self._read_json_body(2 * 1024 * 1024)
                 self._write_json(save_uploaded_plant_photo(payload))
+            elif parsed.path == "/channel/config":
+                payload = self._read_json_body(64 * 1024)
+                params = {
+                    key: ["1" if value is True else "0" if value is False else str(value)]
+                    for key, value in payload.items()
+                    if value is not None
+                }
+                self._write_json(
+                    manager.configure_channel_payload(
+                        first_query_value(params, "device_id"),
+                        first_query_value(params, "channel") or "a",
+                        params,
+                    )
+                )
             else:
                 self._write_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
         except ValueError as err:
@@ -2484,7 +2599,7 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
 
     def _write_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        LOGGER.info(
+        LOGGER.debug(
             "Ingress API response remote=%s path=%s status=%s bytes=%s",
             self.client_address[0],
             urlparse(self.path).path,
@@ -2501,7 +2616,7 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
 
     def _write_html(self, html: str, status: HTTPStatus = HTTPStatus.OK) -> None:
         body = html.encode("utf-8")
-        LOGGER.info(
+        LOGGER.debug(
             "Ingress UI response remote=%s path=%s status=%s bytes=%s",
             self.client_address[0],
             urlparse(self.path).path,
@@ -2520,7 +2635,7 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
         self._write_bytes(text.encode("utf-8"), content_type, status)
 
     def _write_bytes(self, body: bytes, content_type: str, status: HTTPStatus = HTTPStatus.OK) -> None:
-        LOGGER.info(
+        LOGGER.debug(
             "Ingress static response remote=%s path=%s status=%s bytes=%s",
             self.client_address[0],
             urlparse(self.path).path,
@@ -2585,6 +2700,61 @@ def search_plants(query: str) -> list[dict[str, Any]]:
     _PLANT_SEARCH_CACHE[cache_key] = (now, result)
     LOGGER.info("Plant search cache stored query=%r results=%s", query, len(result))
     return result
+
+
+def fetch_plant_by_id(plant_id: int) -> dict[str, Any] | None:
+    if plant_id <= 0:
+        return None
+    now = time.monotonic()
+    cached = _PLANT_ID_CACHE.get(plant_id)
+    if cached is not None and now - cached[0] < PLANT_SEARCH_CACHE_TTL_SECONDS:
+        LOGGER.info("Plant id cache hit id=%s found=%s", plant_id, cached[1] is not None)
+        return cached[1]
+    data = fetch_catalog_json(f"/api/en/plants/id/{plant_id}")
+    plants = data.get("plants")
+    if not isinstance(plants, list):
+        LOGGER.warning("GrowCube cloud catalog returned no plants list for id=%s keys=%s", plant_id, sorted(data.keys()))
+        _PLANT_ID_CACHE[plant_id] = (now, None)
+        return None
+    for plant in plants:
+        if isinstance(plant, dict) and optional_int(plant.get("id")) == plant_id:
+            result = plant_from_api(plant)
+            _PLANT_ID_CACHE[plant_id] = (now, result)
+            return result
+    _PLANT_ID_CACHE[plant_id] = (now, None)
+    return None
+
+
+def apply_catalog_plant_profile(config: ChannelConfig, plant: dict[str, Any], force: bool = False) -> list[str]:
+    changed: list[str] = []
+
+    def set_text(field: str, value: Any, limit: int) -> None:
+        text = str_or_empty(value).strip()[:limit]
+        if text and (force or not str(getattr(config, field) or "").strip()):
+            if getattr(config, field) != text:
+                setattr(config, field, text)
+                changed.append(field)
+
+    def set_int(field: str, value: Any, minimum: int, maximum: int) -> None:
+        parsed = optional_int(value)
+        if parsed is None:
+            return
+        parsed = max(minimum, min(maximum, parsed))
+        current = int(getattr(config, field) or 0)
+        if force or current == 0:
+            if current != parsed:
+                setattr(config, field, parsed)
+                changed.append(field)
+
+    set_text("plant_name", plant.get("display_name") or plant.get("name"), 64)
+    set_text("photo_url", plant.get("image_url"), 512)
+    set_text("type_category", plant.get("category"), 128)
+    set_text("type_description", plant.get("description"), 10000)
+    set_int("temp_min", plant.get("temp_min"), -50, 100)
+    set_int("temp_max", plant.get("temp_max"), -50, 100)
+    set_int("air_humidity_min", plant.get("air_humidity_min"), 0, 100)
+    set_int("air_humidity_max", plant.get("air_humidity_max"), 0, 100)
+    return changed
 
 
 def discovery_networks(network_value: str) -> list[ipaddress.IPv4Network]:

@@ -145,10 +145,15 @@ class TankForecastReport(Report):
 @dataclass(frozen=True, slots=True)
 class DelayedTimedWateringStateReport(Report):
     channel: int
+    mode: int
     enabled: bool
     duration_seconds: int
     interval_hours: int
     next_start_epoch: int
+    smart_min_moisture: int = 0
+    smart_max_moisture: int = 0
+    plant_id: int = 0
+    has_plant_id: bool = False
 
 
 ReportCallback = Callable[[Report], Awaitable[None] | None]
@@ -200,7 +205,7 @@ class GrowCubeClient:
         await self.send(Command(44, time_sync_payload(datetime.now())))
         await self.send(Command(52, ""))
         await self.send(Command(54, ""))
-        await self.send(Command(55, ""))
+        await self.send(Command(55, "v3"))
         return True, ""
 
     async def disconnect(self) -> None:
@@ -225,7 +230,8 @@ class GrowCubeClient:
         if self._writer is None or self._writer.is_closing():
             return
         data = command.to_bytes() if isinstance(command, Command) else command
-        LOGGER.info("GrowCube TX %s:%s %s", self.host, self.port, data.decode("ascii", errors="replace"))
+        text = data.decode("ascii", errors="replace")
+        log_outgoing_command(self.host, self.port, command, text)
         self._writer.write(data)
         await self._writer.drain()
 
@@ -381,11 +387,29 @@ def report_from_message(command: int, payload: str, raw: str) -> Report:
                 )
         if command == 55:
             parts = _split_ints(payload)
+            if len(parts) >= 6 and parts[0] in (2, 3):
+                mode = parts[2]
+                if mode in (0, 1, 2, 3):
+                    return DelayedTimedWateringStateReport(
+                        command,
+                        raw,
+                        channel=parts[1],
+                        mode=mode,
+                        enabled=mode != 0,
+                        duration_seconds=max(0, parts[3]) if mode == 1 else 0,
+                        interval_hours=max(0, parts[4]) if mode == 1 else 0,
+                        next_start_epoch=max(0, parts[5]) if mode == 1 else 0,
+                        smart_min_moisture=max(0, parts[3]) if mode in (2, 3) else 0,
+                        smart_max_moisture=max(0, parts[4]) if mode in (2, 3) else 0,
+                        plant_id=max(0, parts[6]) if parts[0] == 3 and len(parts) > 6 else 0,
+                        has_plant_id=parts[0] == 3 and len(parts) > 6,
+                    )
             if len(parts) == 5:
                 return DelayedTimedWateringStateReport(
                     command,
                     raw,
                     channel=parts[0],
+                    mode=1 if parts[1] == 1 else 0,
                     enabled=parts[1] == 1,
                     duration_seconds=max(0, parts[2]),
                     interval_hours=max(0, parts[3]),
@@ -394,6 +418,45 @@ def report_from_message(command: int, payload: str, raw: str) -> Report:
     except (TypeError, ValueError):
         pass
     return Report(command, raw)
+
+
+def log_outgoing_command(host: str, port: int, command: Command | bytes, text: str) -> None:
+    if not isinstance(command, Command):
+        LOGGER.debug("GrowCube TX %s:%s %s", host, port, text)
+        return
+    parts = command.payload.split("@") if command.payload else []
+    if command.command == 49 and len(parts) >= 4:
+        plant_id = parts[4] if len(parts) >= 5 else ""
+        LOGGER.info(
+            "GrowCube TX watering-mode host=%s:%s channel=%s mode=%s first=%s second=%s plant_id=%s raw=%s",
+            host,
+            port,
+            parts[0],
+            parts[1],
+            parts[2],
+            parts[3],
+            plant_id,
+            text,
+        )
+        return
+    if command.command == 51 and len(parts) >= 4:
+        plant_id = parts[4] if len(parts) >= 5 else ""
+        LOGGER.info(
+            "GrowCube TX scheduled-watering host=%s:%s channel=%s duration_s=%s interval_h=%s epoch=%s plant_id=%s raw=%s",
+            host,
+            port,
+            parts[0],
+            parts[1],
+            parts[2],
+            parts[3],
+            plant_id,
+            text,
+        )
+        return
+    if command.command == 55:
+        LOGGER.info("GrowCube TX watering-state-request host=%s:%s payload=%r raw=%s", host, port, command.payload, text)
+        return
+    LOGGER.debug("GrowCube TX %s:%s %s", host, port, text)
 
 
 async def _maybe_call(callback, *args) -> None:

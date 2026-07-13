@@ -155,7 +155,7 @@ class MqttBridge:
 
     def _queue_device(self, device: dict, unique_id: str, reason: str) -> None:
         self._pending_devices[unique_id] = dict(device)
-        LOGGER.info("Queued MQTT Discovery publish for GrowCube device %s %s", unique_id, reason)
+        LOGGER.debug("Queued MQTT Discovery publish for GrowCube device %s %s", unique_id, reason)
 
     def _drop_client(self) -> None:
         client = self.client

@@ -1,4 +1,4 @@
-const GROWCUBE_CARD_VERSION = "0.2.76-addon-compat";
+const GROWCUBE_CARD_VERSION = "0.2.81-channel-config-post";
 const GROWCUBE_ADDON_API_URL = "__GROWCUBE_ADDON_API_URL__";
 
 class GrowcubeCard extends HTMLElement {
@@ -145,8 +145,10 @@ class GrowcubeCard extends HTMLElement {
       this._dashboardDevices = [record];
     }
     record.channels = record.channels || {};
+    const hasPlantId = Object.prototype.hasOwnProperty.call(values, "plant_id");
     record.channels[channel] = {
       ...(record.channels[channel] || {}),
+      plant_id: hasPlantId ? Number(values.plant_id) || 0 : record.channels[channel]?.plant_id || 0,
       plant_name: values.plant_name || record.channels[channel]?.plant_name || "",
       photo_url: this._plantImageUrl(values.photo_url || record.channels[channel]?.photo_url || ""),
       image_url: this._plantImageUrl(values.image_url || values.photo_url || record.channels[channel]?.image_url || record.channels[channel]?.photo_url || ""),
@@ -168,6 +170,7 @@ class GrowcubeCard extends HTMLElement {
       photo_url: "",
       photo_url_value: "",
       image_url: "",
+      plant_id: 0,
       configured: false,
     };
     this._forgetPlantPhotoUrl(record.device_id || deviceId, channel);
@@ -253,7 +256,7 @@ class GrowcubeCard extends HTMLElement {
     return {};
   }
 
-  async _fetchAddonApi(path, retried = false) {
+  async _fetchAddonApi(path, retried = false, requestOptions = {}) {
     const baseUrl = await this._addonApiUrl();
     if (!baseUrl) {
       console.warn("[GrowCube] add-on API URL is unavailable", { path });
@@ -267,7 +270,9 @@ class GrowcubeCard extends HTMLElement {
       cache: "no-store",
       headers: {
         "Accept": "application/json",
+        ...(requestOptions.body ? { "Content-Type": "application/json" } : {}),
       },
+      ...requestOptions,
     });
     if (!response.ok) {
       const body = await response.text();
@@ -277,7 +282,7 @@ class GrowcubeCard extends HTMLElement {
         if (refreshedUrl && refreshedUrl !== baseUrl) {
           this._addonApiUrlCache = refreshedUrl;
           console.info("[GrowCube] retrying add-on API with refreshed ingress URL", { oldUrl: baseUrl, newUrl: refreshedUrl });
-          return this._fetchAddonApi(path, true);
+          return this._fetchAddonApi(path, true, requestOptions);
         }
       }
       throw new Error(`GrowCube add-on API failed: ${response.status} ${response.statusText}: ${body.slice(0, 240)}`);
@@ -530,6 +535,7 @@ class GrowcubeCard extends HTMLElement {
         const nextChannel = channels[channel] || {};
         const previousChannel = previous.channels?.[channel] || {};
         const hasConfigured = Object.prototype.hasOwnProperty.call(nextChannel, "configured");
+        const hasPlantId = Object.prototype.hasOwnProperty.call(nextChannel, "plant_id");
         const configured = hasConfigured ? Boolean(nextChannel.configured) : previousChannel.configured;
         if (hasConfigured && !configured) {
           channels[channel] = {
@@ -538,6 +544,7 @@ class GrowcubeCard extends HTMLElement {
             photo_url: "",
             photo_url_value: "",
             image_url: "",
+            plant_id: 0,
             photo_url_entity: nextChannel.photo_url_entity || previousChannel.photo_url_entity || "",
             configured: false,
           };
@@ -546,6 +553,7 @@ class GrowcubeCard extends HTMLElement {
         }
         channels[channel] = {
           ...nextChannel,
+          plant_id: hasPlantId ? Number(nextChannel.plant_id) || 0 : Number(previousChannel.plant_id) || 0,
           plant_name: nextChannel.plant_name || previousChannel.plant_name || "",
           photo_url: nextChannel.photo_url_value || nextChannel.photo_url || previousChannel.photo_url_value || previousChannel.photo_url || "",
           photo_url_value: nextChannel.photo_url_value || previousChannel.photo_url_value || "",
@@ -944,16 +952,41 @@ class GrowcubeCard extends HTMLElement {
     return points.map((point) => ({ ...point, x: xFor(point), y: yFor(point) }));
   }
 
+  _dateLocale() {
+    const haLanguage = this._hass?.locale?.language || this._hass?.language;
+    if (haLanguage) {
+      return haLanguage;
+    }
+    if (navigator.languages?.length) {
+      return navigator.languages;
+    }
+    return navigator.language || undefined;
+  }
+
+  _dateTimeOptions(options = {}) {
+    const result = { ...options };
+    if (!Object.prototype.hasOwnProperty.call(result, "hour") || Object.prototype.hasOwnProperty.call(result, "hour12")) {
+      return result;
+    }
+    const timeFormat = this._hass?.locale?.time_format;
+    if (timeFormat === "24") {
+      result.hour12 = false;
+    } else if (timeFormat === "12") {
+      result.hour12 = true;
+    }
+    return result;
+  }
+
   _formatChartHoverDate(timestamp) {
     if (!timestamp) {
       return "";
     }
-    return new Date(timestamp).toLocaleString(undefined, {
+    return new Date(timestamp).toLocaleString(this._dateLocale(), this._dateTimeOptions({
       month: "short",
       day: "numeric",
       hour: "2-digit",
       minute: "2-digit",
-    });
+    }));
   }
 
   _entityState(entityId, fallback = "Unknown") {
@@ -1160,22 +1193,21 @@ class GrowcubeCard extends HTMLElement {
   }
 
   async _configureChannelApi(channel = this._channelKey(), values = {}, apply = true) {
-    const params = new URLSearchParams({ channel, apply: apply ? "1" : "0" });
+    const payload = { channel, apply };
     const deviceId = this._apiDeviceIdHint();
     if (deviceId) {
-      params.set("device_id", deviceId);
+      payload.device_id = deviceId;
     }
     Object.entries(values).forEach(([key, value]) => {
       if (value === undefined || value === null) {
         return;
       }
-      if (typeof value === "boolean") {
-        params.set(key, value ? "1" : "0");
-        return;
-      }
-      params.set(key, String(value));
+      payload[key] = value;
     });
-    return this._fetchAddonApi(`channel/config?${params.toString()}`);
+    return this._fetchAddonApi("channel/config", false, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
   }
 
   _entityDisplay(entityId, fallback = "Unknown") {
@@ -1202,14 +1234,14 @@ class GrowcubeCard extends HTMLElement {
     if (Number.isNaN(timestamp.getTime())) {
       return this._entityDisplay(entityId, fallback);
     }
-    const dateText = timestamp.toLocaleDateString(undefined, {
+    const dateText = timestamp.toLocaleDateString(this._dateLocale(), {
       day: "numeric",
       month: "long",
     });
-    const timeText = timestamp.toLocaleTimeString(undefined, {
+    const timeText = timestamp.toLocaleTimeString(this._dateLocale(), this._dateTimeOptions({
       hour: "2-digit",
       minute: "2-digit",
-    });
+    }));
     return `${dateText} ${timeText}`;
   }
 
@@ -1734,6 +1766,7 @@ class GrowcubeCard extends HTMLElement {
     const photoUrl = this._plantImageUrl(this._plantWizardPhotoUrl || this._catalogImageUrl(profile));
     const values = {
       configured: true,
+      plant_id: this._plantWizardCustom ? 0 : Number(profile.id) || 0,
       plant_name: this._plantWizardName.trim(),
       photo_url: photoUrl,
       type_category: this._plantWizardCategory.trim(),
@@ -1755,7 +1788,7 @@ class GrowcubeCard extends HTMLElement {
       try {
         apiResult = await this._configureChannelApi(channel, values, mode === "Smart" || mode === "Repeating");
       } catch (error) {
-        console.warn("[GrowCube] add plant via add-on API failed; falling back to MQTT entities", {
+        console.warn("[GrowCube] add plant via add-on API failed", {
           channel,
           mode,
           error: error?.message || String(error),
@@ -1763,12 +1796,18 @@ class GrowcubeCard extends HTMLElement {
         apiResult = undefined;
       }
       if (apiResult) {
+        const returnedPlantId = Number(apiResult.plant_id) || 0;
+        if (values.plant_id > 0 && returnedPlantId !== values.plant_id) {
+          throw new Error(`GrowCube add-on returned plant ID ${returnedPlantId} instead of ${values.plant_id}.`);
+        }
         console.info("[GrowCube] add plant via add-on API succeeded", { channel, mode });
         this._rememberCustomPlantProfileFromWizard();
         this._plantWizardOpen = false;
         this._customPlantsOpen = false;
+        const apiResultHasPlantId = Object.prototype.hasOwnProperty.call(apiResult, "plant_id");
         this._applyOptimisticChannelMetadata(channel, {
           ...values,
+          plant_id: apiResultHasPlantId ? returnedPlantId : values.plant_id,
           plant_name: apiResult.plant_name || values.plant_name,
           photo_url: apiResult.photo_url || values.photo_url,
           image_url: apiResult.image_url || apiResult.photo_url || values.photo_url,
@@ -1780,6 +1819,9 @@ class GrowcubeCard extends HTMLElement {
         this._showToast("Plant added");
         this._render();
         return;
+      }
+      if (values.plant_id > 0) {
+        throw new Error("Could not save the catalog plant ID. Check the GrowCube add-on connection and try again.");
       }
       if (entities.name && this._plantWizardName.trim()) {
         await this._setText(entities.name, this._plantWizardName.trim());
@@ -2261,13 +2303,17 @@ class GrowcubeCard extends HTMLElement {
 
   _plantImageUrl(value) {
     const url = this._normalizePlantImageUrl(value);
-    if (!url || !window.GROWCUBE_STANDALONE_WEBUI || !window.GROWCUBE_STANDALONE_ADDON_API_URL) {
+    if (!url) {
+      return url;
+    }
+    const addonApiUrl = window.GROWCUBE_STANDALONE_ADDON_API_URL || this._addonApiUrlCache || "";
+    if (!addonApiUrl) {
       return url;
     }
     try {
       const parsed = new URL(url);
-      if (parsed.hostname === "api.growcube.cc") {
-        return `${window.GROWCUBE_STANDALONE_ADDON_API_URL}/plants/image?url=${encodeURIComponent(url)}`;
+      if (["api.growcube.cc", "www.growcube.cc"].includes(parsed.hostname)) {
+        return `${addonApiUrl}/plants/image?url=${encodeURIComponent(url)}`;
       }
     } catch (error) {
       return url;
@@ -2347,6 +2393,7 @@ class GrowcubeCard extends HTMLElement {
     const imageUrl = this._catalogImageUrl(item);
     return {
       ...item,
+      id: Number(item.id) || 0,
       display_name: item.display_name || item.name || "",
       image_url: imageUrl,
     };
@@ -4831,11 +4878,11 @@ class GrowcubeCard extends HTMLElement {
       return `<div class="chart-time${align === "end" ? " end" : ""}"></div>`;
     }
     const date = new Date(timestamp);
-    const timeText = date.toLocaleTimeString(undefined, {
+    const timeText = date.toLocaleTimeString(this._dateLocale(), this._dateTimeOptions({
       hour: "2-digit",
       minute: "2-digit",
-    });
-    const dateText = date.toLocaleDateString(undefined, {
+    }));
+    const dateText = date.toLocaleDateString(this._dateLocale(), {
       weekday: "short",
       month: "short",
       day: "numeric",
@@ -5070,12 +5117,12 @@ class GrowcubeCard extends HTMLElement {
     if (!timestamp) {
       return "";
     }
-    return new Date(timestamp).toLocaleString(undefined, {
+    return new Date(timestamp).toLocaleString(this._dateLocale(), this._dateTimeOptions({
       month: "short",
       day: "numeric",
       hour: "2-digit",
       minute: "2-digit",
-    });
+    }));
   }
 
   _overviewActivityItems() {
@@ -6095,32 +6142,9 @@ class GrowcubeCard extends HTMLElement {
   }
 
   async _confirmModeWizard() {
-    const entities = this._entities();
     try {
-      if (entities.mode) {
-        await this._setSelect(entities.mode, this._normalizeMode(this._modeWizardMode));
-      }
-      if (this._modeWizardMode === "Smart") {
-        if (entities.smart_min_moisture) {
-          await this._setNumber(entities.smart_min_moisture, this._modeWizardSmartMin);
-        }
-        if (entities.smart_max_moisture) {
-          await this._setNumber(entities.smart_max_moisture, this._modeWizardSmartMax);
-        }
-        if (entities.smart_daytime_watering) {
-          await this._setSwitch(entities.smart_daytime_watering, this._modeWizardDaytime);
-        }
-      } else if (this._modeWizardMode === "Repeating") {
-        if (entities.first_watering_time) {
-          await this._setTime(entities.first_watering_time, this._modeWizardStartTime());
-        }
-        if (entities.duration) {
-          await this._setNumber(entities.duration, this._modeWizardAmount);
-        }
-        if (entities.interval) {
-          await this._setNumber(entities.interval, this._modeWizardIntervalDays * 24);
-        }
-      }
+      // Apply the full watering configuration through the add-on API once.
+      // Sending HA entity updates here as well causes duplicate reset/set commands.
       await this._saveScheduleAfterEdit("Watering settings updated", {
         mode: this._normalizeMode(this._modeWizardMode),
         first_watering_time: this._modeWizardStartTime(),
@@ -6150,30 +6174,8 @@ class GrowcubeCard extends HTMLElement {
         const firstTime = `${String(firstHour).padStart(2, "0")}:${String(firstMinute).padStart(2, "0")}:00`;
         const amount = this._clamp(Number(this._editValue("schedule_amount")), 10, 500);
         const intervalHours = this._clamp(Number(this._editValue("schedule_days")), 1, 10) * 24;
-        if (entities.mode) {
-          await this._setSelect(entities.mode, modeValue);
-        }
-        if (modeValue === "Smart") {
-          if (entities.smart_min_moisture) {
-            await this._setNumber(entities.smart_min_moisture, smartMin);
-          }
-          if (entities.smart_max_moisture) {
-            await this._setNumber(entities.smart_max_moisture, smartMax);
-          }
-          if (entities.smart_daytime_watering) {
-            await this._setSwitch(entities.smart_daytime_watering, smartDaytime);
-          }
-        } else if (modeValue === "Repeating") {
-          if (entities.first_watering_time) {
-            await this._setTime(entities.first_watering_time, firstTime);
-          }
-          if (entities.duration) {
-            await this._setNumber(entities.duration, amount);
-          }
-          if (entities.interval) {
-            await this._setNumber(entities.interval, intervalHours);
-          }
-        }
+        // Apply the full watering configuration through the add-on API once.
+        // Sending HA entity updates here as well causes duplicate reset/set commands.
         await this._saveScheduleAfterEdit("Watering settings updated", {
           mode: modeValue,
           smart_min_moisture: smartMin,
@@ -6202,21 +6204,14 @@ class GrowcubeCard extends HTMLElement {
       } else if (kind === "smartRange") {
         const min = this._clamp(Number(this._editValue("smart_min")), 1, 98);
         const max = this._clamp(Number(this._editValue("smart_max")), min + 1, 99);
-        if (entities.smart_min_moisture) {
-          await this._setNumber(entities.smart_min_moisture, min);
-        }
-        if (entities.smart_max_moisture) {
-          await this._setNumber(entities.smart_max_moisture, max);
-        }
+        // Apply both limits together through the add-on API once.
         await this._saveScheduleAfterEdit("Moisture range updated", {
           smart_min_moisture: min,
           smart_max_moisture: max,
         });
       } else if (kind === "daytime") {
         const daytime = this._editValue("daytime") === "on";
-        if (entities.smart_daytime_watering) {
-          await this._setSwitch(entities.smart_daytime_watering, daytime);
-        }
+        // Apply through the add-on API once to avoid a duplicate firmware reset/set.
         await this._saveScheduleAfterEdit("Daytime watering updated", {
           smart_daytime_watering: daytime,
         });
