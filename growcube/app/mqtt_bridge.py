@@ -183,6 +183,24 @@ class MqttBridge:
         await self._sensor(unique_id, "tank_used", "Tank used", base, device_info, "mL", None, "{{ value_json.tank_used_ml }}", "mdi:water-minus")
         await self._sensor(
             unique_id,
+            "firmware_update_status",
+            "Firmware update status",
+            base,
+            device_info,
+            None,
+            None,
+            "{{ value_json.firmware_update_status }}",
+            "mdi:update",
+            (
+                "{"
+                "\"installed_version\":{{ value_json.version | tojson }},"
+                "\"firmware_update_error\":{{ value_json.firmware_update_error | tojson }},"
+                "\"firmware_update_started_at\":{{ value_json.firmware_update_started_at | tojson }}"
+                "}"
+            ),
+        )
+        await self._sensor(
+            unique_id,
             "tank_days_left",
             "Tank days left",
             base,
@@ -205,6 +223,8 @@ class MqttBridge:
         await self._binary(unique_id, "water_warning", "Water warning", base, device_info, "{{ 'ON' if value_json.water_warning else 'OFF' }}", "problem", "mdi:water-alert", "diagnostic")
         await self._number(unique_id, "tank_capacity", "Tank capacity", base, device_info, 500, 50000, 50, "mL", "mdi:cup-water", "{{ value_json.tank_capacity_ml }}")
         await self._button(unique_id, "mark_tank_full", "Mark tank full", base, device_info, "mark_tank_full", "mdi:cup-water")
+        await self._button(unique_id, "reset_network", "Reset network", base, device_info, "reset_network", "mdi:wifi-refresh")
+        await self._button(unique_id, "update_firmware", "Update firmware", base, device_info, "update_firmware", "mdi:update")
 
         for channel in range(4):
             channel_id = "abcd"[channel]
@@ -324,7 +344,7 @@ class MqttBridge:
             await self._button(unique_id, f"save_schedule_{channel_id}", f"Save watering {channel_name}", base, device_info, f"save_schedule_{channel_id}", "mdi:content-save")
             await self._button(unique_id, f"add_plant_{channel_id}", f"Add plant {channel_name}", base, device_info, f"add_plant_{channel_id}", "mdi:plus-circle-outline")
             await self._button(unique_id, f"reset_plant_{channel_id}", f"Reset plant {channel_name}", base, device_info, f"reset_plant_{channel_id}", "mdi:delete-outline")
-            await self._number(unique_id, f"manual_duration_seconds_{channel_id}", f"Manual watering amount {channel_name}", base, device_info, 30, 150, 10, "mL", "mdi:watering-can", f"{{{{ {channel_base}.config.manual_duration_seconds }}}}")
+            await self._number(unique_id, f"manual_duration_seconds_{channel_id}", f"Manual watering amount {channel_name}", base, device_info, 30, 500, 10, "mL", "mdi:watering-can", f"{{{{ {channel_base}.config.manual_duration_seconds }}}}")
             await self._number(unique_id, f"duration_seconds_{channel_id}", f"Watering amount {channel_name}", base, device_info, 10, 500, 10, "mL", "mdi:timer-outline", f"{{{{ {channel_base}.config.amount_ml }}}}")
             await self._number(unique_id, f"interval_hours_{channel_id}", f"Watering interval {channel_name}", base, device_info, 1, 240, 1, "h", "mdi:calendar-clock", f"{{{{ {channel_base}.config.interval_hours }}}}")
             await self._number(unique_id, f"smart_min_moisture_{channel_id}", f"Minimum moisture {channel_name}", base, device_info, 1, 99, 1, "%", "mdi:water-percent", f"{{{{ {channel_base}.config.smart_min_moisture }}}}")
@@ -333,7 +353,7 @@ class MqttBridge:
             await self._switch(unique_id, f"smart_daytime_watering_{channel_id}", f"Daytime watering {channel_name}", base, device_info, "mdi:white-balance-sunny", f"{{{{ 'ON' if {channel_base}.config.smart_daytime_watering else 'OFF' }}}}")
             await self._text(unique_id, f"plant_name_{channel_id}", f"Plant name {channel_name}", base, device_info, 64, "mdi:flower", f"{{{{ {channel_base}.config.plant_name }}}}")
             await self._text(unique_id, f"plant_photo_url_{channel_id}", f"Plant photo URL {channel_name}", base, device_info, 512, "mdi:image-outline", f"{{{{ {channel_base}.config.photo_url }}}}")
-            await self._time(unique_id, f"first_watering_time_{channel_id}", f"First watering time {channel_name}", base, device_info, "mdi:clock-start", f"{{{{ {channel_base}.config.first_watering_time }}}}")
+            await self._time(unique_id, f"first_watering_time_{channel_id}", f"Watering time {channel_name}", base, device_info, "mdi:clock-start", f"{{{{ {channel_base}.config.first_watering_time }}}}")
 
     async def _clear_legacy_configs(self, device_id: str) -> None:
         assert self.client is not None

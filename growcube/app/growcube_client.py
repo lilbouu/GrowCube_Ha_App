@@ -18,6 +18,7 @@ from growcube_protocol import (
 )
 
 GROWCUBE_PORT = 8800
+TIME_SYNC_DELAYS_SECONDS = (15, 60, 180)
 LOGGER = logging.getLogger("growcube-addon.client")
 WATERING_SOURCE_BY_CODE = {
     1: "smart",
@@ -158,6 +159,7 @@ class DelayedTimedWateringStateReport(Report):
 
 ReportCallback = Callable[[Report], Awaitable[None] | None]
 ConnectionCallback = Callable[[], Awaitable[None] | None]
+TimeProvider = Callable[[], datetime | Awaitable[datetime]]
 
 
 class Command:
@@ -177,16 +179,19 @@ class GrowCubeClient:
         on_report: ReportCallback | None = None,
         on_connected: ConnectionCallback | None = None,
         on_disconnected: ConnectionCallback | None = None,
+        time_provider: TimeProvider | None = None,
     ) -> None:
         self.host = host
         self.port = port
         self.on_report = on_report
         self.on_connected = on_connected
         self.on_disconnected = on_disconnected
+        self.time_provider = time_provider or datetime.now
         self.connected = False
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._read_task: asyncio.Task | None = None
+        self._time_sync_tasks: set[asyncio.Task] = set()
         self._manual_tasks: set[asyncio.Task] = set()
         self._disconnecting = False
 
@@ -202,15 +207,19 @@ class GrowCubeClient:
         self.connected = True
         self._read_task = asyncio.create_task(self._read_loop())
         await _maybe_call(self.on_connected)
-        await self.send(Command(44, time_sync_payload(datetime.now())))
+        await self.sync_time()
         await self.send(Command(52, ""))
         await self.send(Command(54, ""))
         await self.send(Command(55, "v3"))
+        self._schedule_time_syncs()
         return True, ""
 
     async def disconnect(self) -> None:
         self._disconnecting = True
         self.connected = False
+        for task in list(self._time_sync_tasks):
+            task.cancel()
+        self._time_sync_tasks.clear()
         for task in list(self._manual_tasks):
             task.cancel()
         self._manual_tasks.clear()
@@ -250,6 +259,39 @@ class GrowCubeClient:
         task = asyncio.create_task(self._close_after(channel, duration))
         self._manual_tasks.add(task)
         task.add_done_callback(self._manual_tasks.discard)
+
+    async def reset_network(self) -> None:
+        await self.send(b"ele507")
+
+    async def start_firmware_update(self) -> None:
+        await self.send(b"ele504")
+
+    async def sync_time(self) -> None:
+        value = await self._sync_time_value()
+        await self.send(Command(44, time_sync_payload(value)))
+
+    def _schedule_time_syncs(self) -> None:
+        for delay in TIME_SYNC_DELAYS_SECONDS:
+            task = asyncio.create_task(self._sync_time_after_delay(delay))
+            self._time_sync_tasks.add(task)
+            task.add_done_callback(self._time_sync_tasks.discard)
+
+    async def _sync_time_after_delay(self, delay: int) -> None:
+        await asyncio.sleep(delay)
+        if not self.connected or self._writer is None or self._writer.is_closing():
+            return
+        await self.sync_time()
+
+    async def _sync_time_value(self) -> datetime:
+        try:
+            value = self.time_provider()
+            if hasattr(value, "__await__"):
+                value = await value
+            if isinstance(value, datetime):
+                return value
+        except Exception as err:  # pylint: disable=broad-except
+            LOGGER.warning("GrowCube time provider failed for %s:%s: %s", self.host, self.port, err)
+        return datetime.now().astimezone()
 
     async def _close_after(self, channel: int, duration: int) -> None:
         await asyncio.sleep(max(1, int(duration)))
@@ -452,6 +494,9 @@ def log_outgoing_command(host: str, port: int, command: Command | bytes, text: s
             plant_id,
             text,
         )
+        return
+    if command.command == 44:
+        LOGGER.info("GrowCube TX time-sync host=%s:%s payload=%s raw=%s", host, port, command.payload, text)
         return
     if command.command == 55:
         LOGGER.info("GrowCube TX watering-state-request host=%s:%s payload=%r raw=%s", host, port, command.payload, text)

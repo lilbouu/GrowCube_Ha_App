@@ -20,10 +20,11 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, urljoin, urlparse
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -61,6 +62,11 @@ OPTIONS_PATH = DATA_DIR / "options.json"
 APP_DIR = Path(__file__).parent
 CARD_SOURCE_PATH = APP_DIR / "www" / "growcube-card.js"
 CARD_IMAGE_SOURCE_DIR = APP_DIR / "www" / "images"
+FIRMWARE_DATA_IMAGE_PATH = DATA_DIR / "firmware" / "growcube-local.bin"
+FIRMWARE_BUNDLED_IMAGE_PATH = APP_DIR / "firmware" / "growcube-local.bin"
+FIRMWARE_DOWNLOAD_PATH = DATA_DIR / "firmware" / "GrowCube-Software.bin"
+FIRMWARE_UPDATE_CHECK_URL = "https://www.growcube.cc/software/2.4G/"
+FIRMWARE_LATEST_MESSAGE = "当前已是最新版本！"
 PLANT_PHOTO_DIR = DATA_DIR / "plant_photos"
 CARD_API_URL_PLACEHOLDER = "__GROWCUBE_ADDON_API_URL__"
 DEFAULT_INGRESS_PORT = 8099
@@ -97,8 +103,28 @@ HISTORY_RETRY_CHECK_SECONDS = 15
 HISTORY_LOADING_STALE_SECONDS = 45
 TIMED_HISTORY_REFRESH_GRACE_SECONDS = 5
 TIMED_HISTORY_REFRESH_RETRY_SECONDS = 15
+WATERING_HISTORY_REFRESH_DELAY_SECONDS = 25
 HISTORY_TRAILING_GAP_RETRY_SECONDS = 60 * 60
 HISTORY_TRAILING_GAP_HOURS = 0
+FIRMWARE_OTA_READY_DELAY_SECONDS = 20
+FIRMWARE_UPLOAD_TIMEOUT_SECONDS = 120
+FIRMWARE_DOWNLOAD_TIMEOUT_SECONDS = 60
+FIRMWARE_MAX_BYTES = 4 * 1024 * 1024
+NETWORK_TIME_URLS = (
+    # UTC time is read from the HTTP Date header, not from the response body.
+    "https://api.growcube.cc/",
+    "https://www.growcube.cc/",
+    "https://www.baidu.com/",
+    "https://www.qq.com/",
+    "https://www.aliyun.com/",
+    "https://www.tencent.com/",
+    "https://www.cloudflare.com/cdn-cgi/trace",
+    "https://api.github.com/",
+    "https://www.google.com/generate_204",
+    "http://www.google.com/generate_204",
+    "http://worldtimeapi.org/api/timezone/Etc/UTC",
+)
+NETWORK_TIME_TIMEOUT_SECONDS = 5
 
 
 @dataclass(slots=True)
@@ -165,6 +191,9 @@ class DeviceState:
     tank_remaining_ml: int = 1500
     tank_used_ml: int = 0
     tank_forecast: dict[str, Any] = field(default_factory=dict)
+    firmware_update_status: str = "idle"
+    firmware_update_error: str = ""
+    firmware_update_started_at: str | None = None
     updated_at: str | None = None
     channels: list[ChannelState] = field(default_factory=lambda: [ChannelState() for _ in range(4)])
 
@@ -199,6 +228,7 @@ class DeviceRuntime:
                 on_report=lambda report: self.manager.handle_report(self.state.id, report),
                 on_connected=lambda: self.manager.handle_connected(self.state.id),
                 on_disconnected=lambda: self.manager.handle_disconnected(self.state.id),
+                time_provider=self.manager.current_time_for_device_sync,
             )
             self.client = client
             ok, error = await client.connect()
@@ -252,15 +282,23 @@ class GrowCubeManager:
         self.devices: dict[str, DeviceState] = {}
         self.runtimes: dict[str, DeviceRuntime] = {}
         self.pending_apply_tasks: dict[tuple[str, int], asyncio.Task] = {}
+        self.pending_history_refresh_tasks: dict[tuple[str, int], asyncio.Task] = {}
         self.history_retry_task: asyncio.Task | None = None
         self.notification_signatures: dict[str, tuple[str, ...]] = {}
+        self.homeassistant_time_zone: str | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
         self.mqtt_bridge: MqttBridge | None = None
 
     def load(self) -> None:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
+        FIRMWARE_DATA_IMAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
         stored = self._read_json(STATE_PATH, {})
         options = self._read_json(OPTIONS_PATH, {})
+        self.homeassistant_time_zone = homeassistant_time_zone()
+        if self.homeassistant_time_zone:
+            LOGGER.info("Using Home Assistant time zone for GrowCube sync: %s", self.homeassistant_time_zone)
+        else:
+            LOGGER.info("Using add-on local time zone for GrowCube sync: %s", local_timezone())
 
         stored_devices: list[dict[str, Any]] = []
         if isinstance(stored.get("devices"), list):
@@ -314,6 +352,33 @@ class GrowCubeManager:
         if self.loop is None:
             raise RuntimeError("manager loop is not running")
         return asyncio.run_coroutine_threadsafe(coro, self.loop)
+
+    async def current_time_for_device_sync(self) -> datetime:
+        zone = self.device_sync_timezone()
+        network_time = await asyncio.to_thread(fetch_network_utc_time)
+        if network_time is not None:
+            value = network_time.astimezone(zone)
+            source = "network"
+        else:
+            value = datetime.now(zone)
+            source = "local-fallback"
+        LOGGER.info(
+            "GrowCube time-sync source=%s value=%s ha_time_zone=%s env_TZ=%s system_zone=%s",
+            source,
+            value.isoformat(timespec="seconds"),
+            self.homeassistant_time_zone or "",
+            os.environ.get("TZ", ""),
+            datetime.now().astimezone().tzinfo,
+        )
+        return value
+
+    def device_sync_timezone(self):
+        if self.homeassistant_time_zone:
+            try:
+                return ZoneInfo(self.homeassistant_time_zone)
+            except ZoneInfoNotFoundError:
+                LOGGER.warning("Home Assistant time zone is not available in add-on: %s", self.homeassistant_time_zone)
+        return local_timezone()
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
@@ -379,6 +444,41 @@ class GrowCubeManager:
             "mode": state.channels[channel].config.mode,
         }
 
+    def reset_network_payload(self, device_id: str) -> dict[str, Any]:
+        state = self.find_device(device_id) if device_id else next(iter(self.devices.values()), None)
+        if state is None:
+            raise KeyError("device not found")
+        future = self.submit(self.reset_network(state.id))
+        future.result(timeout=10)
+        return {
+            "ok": True,
+            "message": "network reset requested",
+            "device_id": mqtt_device_unique_id(self._state_to_dict(state)),
+        }
+
+    def firmware_update_payload(self, device_id: str) -> dict[str, Any]:
+        state = self.find_device(device_id) if device_id else next(iter(self.devices.values()), None)
+        if state is None:
+            raise KeyError("device not found")
+        future = self.submit(self.update_firmware(state.id))
+        result = future.result(timeout=FIRMWARE_UPLOAD_TIMEOUT_SECONDS + FIRMWARE_OTA_READY_DELAY_SECONDS + 20)
+        return {
+            "ok": True,
+            "message": "firmware update uploaded",
+            "device_id": mqtt_device_unique_id(self._state_to_dict(state)),
+            **result,
+        }
+
+    def firmware_check_payload(self, device_id: str) -> dict[str, Any]:
+        state = self.find_device(device_id) if device_id else next(iter(self.devices.values()), None)
+        if state is None:
+            raise KeyError("device not found")
+        return {
+            "ok": True,
+            "device_id": mqtt_device_unique_id(self._state_to_dict(state)),
+            **check_growcube_firmware_update(state.version),
+        }
+
     def discover_payload(self, network_value: str) -> dict[str, Any]:
         future = self.submit(self.discover_devices(network_value))
         devices = future.result(timeout=45)
@@ -399,6 +499,18 @@ class GrowCubeManager:
         future = self.submit(self.remove_device(state.id))
         future.result(timeout=10)
         return {"ok": True, "device_id": device_id}
+
+    def rename_device_payload(self, params: dict[str, list[str]]) -> dict[str, Any]:
+        device_id = first_query_value(params, "device_id")
+        name = first_query_value(params, "name").strip()[:64]
+        if not name:
+            raise ValueError("name is required")
+        state = self.find_device(device_id)
+        if state is None:
+            raise KeyError("device not found")
+        future = self.submit(self.rename_device(state.id, name))
+        future.result(timeout=5)
+        return {"ok": True, "device_id": device_id, "name": name}
 
     def entity_command_payload(self, params: dict[str, list[str]]) -> dict[str, Any]:
         entity_id_value = first_query_value(params, "entity_id")
@@ -477,6 +589,9 @@ class GrowCubeManager:
             "connecting": state.connecting,
             "error": state.error,
             "version": state.version or "",
+            "firmware_update_status": state.firmware_update_status,
+            "firmware_update_error": state.firmware_update_error,
+            "firmware_update_started_at": state.firmware_update_started_at,
             "addon_api_url": device.get("addon_api_url") or "",
             "entities": entities,
             "channels": channels,
@@ -538,9 +653,18 @@ class GrowCubeManager:
         if runtime is not None:
             await runtime.disconnect()
         self.cancel_pending_apply(device_id)
+        self.cancel_pending_history_refresh(device_id)
         async with self.async_lock:
             self.devices.pop(device_id, None)
             self.save_locked()
+
+    async def rename_device(self, device_id: str, name: str) -> None:
+        state = self.devices.get(device_id)
+        if state is None:
+            raise KeyError(device_id)
+        async with self.async_lock:
+            state.name = name.strip()[:64] or state.name
+            self.touch_locked(state)
 
     async def connect(self, device_id: str) -> None:
         state = self.devices.get(device_id)
@@ -557,7 +681,7 @@ class GrowCubeManager:
         if runtime is None or runtime.client is None or not runtime.client.connected:
             raise RuntimeError("device is not connected")
         channel = validate_channel(channel)
-        amount_ml = clamp_int(amount_ml, 30, 150, 50)
+        amount_ml = clamp_int(amount_ml, 30, 500, 50)
         duration = watering_duration_seconds(amount_ml)
         runtime.pending_manual_amounts[channel] = amount_ml
         await runtime.client.water(channel, duration)
@@ -567,6 +691,68 @@ class GrowCubeManager:
         if runtime is None or runtime.client is None or not runtime.client.connected:
             raise RuntimeError("device is not connected")
         await runtime.client.close_pump(validate_channel(channel))
+
+    async def reset_network(self, device_id: str) -> None:
+        state = self.devices.get(device_id)
+        if state is None:
+            raise KeyError(device_id)
+        runtime = self.runtimes.get(device_id)
+        if runtime is None or runtime.client is None or not runtime.client.connected:
+            raise RuntimeError("device is not connected")
+        LOGGER.warning("Reset network requested device=%s", state.host)
+        await runtime.client.reset_network()
+        async with self.async_lock:
+            state.connected = False
+            state.connecting = False
+            if state.connection_problem_since is None:
+                state.connection_problem_since = now_iso()
+            self.touch_locked(state)
+
+    async def update_firmware(self, device_id: str) -> dict[str, Any]:
+        state = self.devices.get(device_id)
+        if state is None:
+            raise KeyError(device_id)
+        runtime = self.runtimes.get(device_id)
+        if runtime is None or runtime.client is None or not runtime.client.connected:
+            raise RuntimeError("device is not connected")
+        async with self.async_lock:
+            state.firmware_update_status = "updating"
+            state.firmware_update_error = ""
+            state.firmware_update_started_at = now_iso()
+            self.touch_locked(state)
+        LOGGER.warning("Firmware update requested device=%s current_version=%s", state.host, state.version or "unknown")
+        try:
+            firmware = await asyncio.to_thread(download_growcube_firmware_update, state.version)
+            LOGGER.warning("Firmware image downloaded device=%s firmware=%s bytes=%s", state.host, firmware.name, firmware.stat().st_size)
+            await runtime.client.start_firmware_update()
+            await asyncio.sleep(FIRMWARE_OTA_READY_DELAY_SECONDS)
+            upload_result = await asyncio.to_thread(upload_firmware_image, state.host, firmware)
+        except Exception as err:
+            async with self.async_lock:
+                state.firmware_update_status = "error"
+                state.firmware_update_error = str(err)
+                state.connected = False
+                state.connecting = True
+                if state.connection_problem_since is None:
+                    state.connection_problem_since = now_iso()
+                self.touch_locked(state)
+            if runtime.client is not None:
+                await runtime.client.disconnect()
+            runtime.schedule_reconnect()
+            raise
+        else:
+            async with self.async_lock:
+                state.firmware_update_status = "uploaded"
+                state.firmware_update_error = ""
+                state.connected = False
+                state.connecting = True
+                if state.connection_problem_since is None:
+                    state.connection_problem_since = now_iso()
+                self.touch_locked(state)
+            if runtime.client is not None:
+                await runtime.client.disconnect()
+            runtime.schedule_reconnect()
+            return upload_result
 
     async def request_history(self, device_id: str, channel: int) -> None:
         runtime = self.runtimes.get(device_id)
@@ -689,14 +875,24 @@ class GrowCubeManager:
     async def discover_devices(self, network_value: str) -> list[dict[str, Any]]:
         networks = discovery_networks(network_value)
         semaphore = asyncio.Semaphore(DISCOVERY_CONCURRENCY)
+        time_lock = asyncio.Lock()
+        sync_time: datetime | None = None
         found: dict[str, dict[str, Any]] = {}
+
+        async def discovery_time_provider() -> datetime:
+            nonlocal sync_time
+            if sync_time is None:
+                async with time_lock:
+                    if sync_time is None:
+                        sync_time = await self.current_time_for_device_sync()
+            return sync_time
 
         async def check_host(host: str) -> None:
             async with semaphore:
                 try:
                     if not await tcp_port_open(host, 8800, DISCOVERY_PORT_TIMEOUT_SECONDS):
                         return
-                    device = await probe_growcube_device(host)
+                    device = await probe_growcube_device(host, discovery_time_provider)
                     if device is None:
                         return
                     found[device["device_id"] or host] = device
@@ -751,6 +947,49 @@ class GrowCubeManager:
         finally:
             if self.pending_apply_tasks.get(key) is asyncio.current_task():
                 self.pending_apply_tasks.pop(key, None)
+
+    def schedule_history_refresh_after_watering(self, device_id: str, channel: int) -> None:
+        channel = validate_channel(channel)
+        if device_id not in self.devices:
+            return
+        key = (device_id, channel)
+        existing = self.pending_history_refresh_tasks.get(key)
+        if existing is not None and not existing.done():
+            return
+        task = asyncio.create_task(self._refresh_history_after_watering_delay(device_id, channel))
+        self.pending_history_refresh_tasks[key] = task
+
+    def cancel_pending_history_refresh(self, device_id: str, channel: int | None = None) -> None:
+        keys = [
+            key for key in self.pending_history_refresh_tasks
+            if key[0] == device_id and (channel is None or key[1] == channel)
+        ]
+        for key in keys:
+            task = self.pending_history_refresh_tasks.pop(key)
+            task.cancel()
+
+    async def _refresh_history_after_watering_delay(self, device_id: str, channel: int) -> None:
+        key = (device_id, channel)
+        try:
+            await asyncio.sleep(WATERING_HISTORY_REFRESH_DELAY_SECONDS)
+            state = self.devices.get(device_id)
+            if state is None:
+                return
+            LOGGER.info("Requesting watering history after pump activity device=%s channel=%s", state.host, CHANNEL_NAMES[channel])
+            await self.request_history(device_id, channel)
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:
+            state = self.devices.get(device_id)
+            LOGGER.warning(
+                "Delayed watering history refresh failed device=%s channel=%s error=%s",
+                state.host if state is not None else device_id,
+                CHANNEL_NAMES[channel],
+                err,
+            )
+        finally:
+            if self.pending_history_refresh_tasks.get(key) is asyncio.current_task():
+                self.pending_history_refresh_tasks.pop(key, None)
 
     async def history_retry_loop(self) -> None:
         while True:
@@ -1034,6 +1273,10 @@ class GrowCubeManager:
                 state.tank_used_ml = 0
                 tank_update = (state.tank_capacity_ml, state.tank_remaining_ml)
                 changed = "tank marked full"
+            elif key == "reset_network":
+                changed = "network reset requested"
+            elif key == "update_firmware":
+                changed = "firmware update requested"
             elif channel is not None:
                 config = state.channels[channel].config
                 if key.startswith("water_plant_"):
@@ -1055,7 +1298,7 @@ class GrowCubeManager:
                     changed = f"mode={config.mode}"
                     schedule_apply = True
                 elif key.startswith("manual_duration_seconds_"):
-                    config.manual_duration_seconds = clamp_int(payload, 30, 150, config.manual_duration_seconds)
+                    config.manual_duration_seconds = clamp_int(payload, 30, 500, config.manual_duration_seconds)
                     changed = f"manual_amount_ml={config.manual_duration_seconds}"
                 elif key.startswith("duration_seconds_"):
                     config.amount_ml = clamp_int(payload, 10, 500, config.amount_ml)
@@ -1121,6 +1364,10 @@ class GrowCubeManager:
             async with self.async_lock:
                 state.channels[reset_channel] = ChannelState()
                 self.touch_locked(state)
+        elif key == "reset_network":
+            await self.reset_network(state.id)
+        elif key == "update_firmware":
+            await self.update_firmware(state.id)
         elif tank_update is not None:
             await self.set_tank_level(state.id, tank_update[0], tank_update[1])
         elif channel is not None and schedule_apply:
@@ -1196,6 +1443,7 @@ class GrowCubeManager:
                 channel = state.channels[report.channel]
                 channel.pump_open = report.open
                 if report.open:
+                    self.schedule_history_refresh_after_watering(device_id, report.channel)
                     amount = None
                     runtime = self.runtimes.get(device_id)
                     if runtime is not None:
@@ -1508,7 +1756,7 @@ class GrowCubeManager:
                         air_humidity_min=clamp_int(config.get("air_humidity_min"), 0, 100, 0),
                         air_humidity_max=clamp_int(config.get("air_humidity_max"), 0, 100, 0),
                         mode=str(config.get("mode") or "Disabled"),
-                        manual_duration_seconds=clamp_int(config.get("manual_duration_seconds"), 30, 150, 50),
+                        manual_duration_seconds=clamp_int(config.get("manual_duration_seconds"), 30, 500, 50),
                         duration_seconds=watering_duration_seconds(amount_ml),
                         amount_ml=amount_ml,
                         interval_hours=clamp_int(config.get("interval_hours"), 1, 240, 24),
@@ -1542,6 +1790,9 @@ class GrowCubeManager:
             tank_remaining_ml=clamp_int(item.get("tank_remaining_ml"), 0, 50000, 1500),
             tank_used_ml=clamp_int(item.get("tank_used_ml"), 0, 50000, 0),
             tank_forecast=item.get("tank_forecast") if isinstance(item.get("tank_forecast"), dict) else {},
+            firmware_update_status=str(item.get("firmware_update_status") or "idle"),
+            firmware_update_error=str(item.get("firmware_update_error") or ""),
+            firmware_update_started_at=item.get("firmware_update_started_at"),
             updated_at=item.get("updated_at"),
             channels=channels,
         )
@@ -1577,6 +1828,9 @@ class GrowCubeManager:
             "tank_unusable_reserve_ml": unusable_reserve_ml,
             "tank_usable_remaining_ml": usable_remaining_ml,
             "tank_forecast": state.tank_forecast,
+            "firmware_update_status": state.firmware_update_status,
+            "firmware_update_error": state.firmware_update_error,
+            "firmware_update_started_at": state.firmware_update_started_at,
             "updated_at": state.updated_at,
             "channels": [
                 {
@@ -1989,6 +2243,14 @@ def web_ui_html() -> str:
       padding: 12px;
     }
     .item > button { justify-self: end; }
+    .item-actions {
+      display: inline-flex;
+      gap: 8px;
+      justify-self: end;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .item-actions button { min-width: 92px; }
     .title { font-weight: 650; overflow-wrap: anywhere; }
     .meta { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
     .status {
@@ -2003,6 +2265,118 @@ def web_ui_html() -> str:
     .dot.ok { background: var(--ok); }
     .dot.warn { background: var(--warn); }
     .dot.bad { background: var(--bad); }
+    .spinner {
+      width: 18px;
+      height: 18px;
+      border: 2px solid color-mix(in srgb, var(--accent) 24%, transparent);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.9s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 40;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0, 0, 0, 0.42);
+      padding: 18px;
+    }
+    .modal {
+      width: min(560px, 100%);
+      max-height: calc(100vh - 36px);
+      overflow: auto;
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+      box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+    }
+    .modal-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+    .modal-header h2 { margin: 0; }
+    .modal-title-row {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+    .modal-title-row h2 { overflow-wrap: anywhere; }
+    .round-edit {
+      display: inline-flex;
+      width: 28px;
+      height: 28px;
+      min-width: 28px;
+      align-items: center;
+      justify-content: center;
+      border: 0;
+      border-radius: 50%;
+      padding: 0;
+      background: color-mix(in srgb, var(--text) 8%, transparent);
+      color: var(--muted);
+    }
+    .round-edit:hover {
+      background: color-mix(in srgb, var(--accent) 18%, transparent);
+      color: var(--text);
+    }
+    .round-edit svg { width: 15px; height: 15px; }
+    .modal-body { display: grid; gap: 14px; }
+    .settings-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .settings-stat {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+    }
+    .settings-stat:only-child { grid-column: 1 / -1; }
+    .settings-stat .label {
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 3px;
+    }
+    .settings-stat .value { font-weight: 650; overflow-wrap: anywhere; }
+    .settings-stat input {
+      min-width: 0;
+      width: 100%;
+      flex: 0 0 auto;
+      border: 0;
+      border-radius: 0;
+      padding: 0;
+      font-weight: 650;
+      background: transparent;
+    }
+    .settings-stat input:focus { outline: none; }
+    .settings-stat:focus-within { border-color: var(--accent); }
+    .warning-box {
+      border: 1px solid color-mix(in srgb, var(--warn) 48%, transparent);
+      border-radius: 8px;
+      padding: 10px;
+      color: var(--text);
+      background: color-mix(in srgb, var(--warn) 12%, transparent);
+    }
+    .modal-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .modal-status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 24px;
+      color: var(--muted);
+    }
     .empty { color: var(--muted); padding: 10px 0; }
     .error { color: var(--bad); }
     .hidden { display: none; }
@@ -2030,7 +2404,9 @@ def web_ui_html() -> str:
       main { padding: 16px; }
       .topbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; padding: 0; }
       .item { grid-template-columns: 1fr; display: grid; }
+      .item-actions { width: 100%; justify-self: stretch; }
       .item button:not(.icon-control) { width: 100%; justify-self: stretch; }
+      .settings-grid { grid-template-columns: 1fr; }
       .discover-actions button { flex: 1 1 100%; }
     }
   </style>
@@ -2079,9 +2455,9 @@ def web_ui_html() -> str:
     </section>
 
     <section>
-      <h2>Discover</h2>
+      <h2>Discover GrowCube</h2>
       <div class="row discover-actions">
-        <button id="discoverBtn">Search network</button>
+        <button id="discoverBtn">Automatic search</button>
         <button class="secondary" id="networkOptionsBtn" type="button" aria-expanded="false" aria-controls="networkOptionsRow">Network</button>
       </div>
       <div class="row network-row hidden" id="networkOptionsRow">
@@ -2100,6 +2476,7 @@ def web_ui_html() -> str:
       </div>
     </section>
   </div>
+  <div id="deviceSettingsModal" class="modal-backdrop hidden"></div>
 </main>
 <script>
 window.GROWCUBE_STANDALONE_WEBUI = true;
@@ -2128,6 +2505,15 @@ const basePath = window.location.pathname.endsWith("/") ? (window.location.pathn
 const addonApiUrl = `${window.location.origin}${basePath === "/" ? "" : basePath}`;
 window.GROWCUBE_STANDALONE_ADDON_API_URL = addonApiUrl;
 let dashboardPayload = {devices: []};
+let deviceSettingsId = "";
+let deviceSettingsBusy = "";
+let deviceSettingsMessage = "";
+let deviceSettingsTone = "";
+let deviceSettingsUpdateAvailable = false;
+let deviceSettingsLatestVersion = "";
+let deviceSettingsConfirm = "";
+let deviceSettingsUpdateAcknowledged = false;
+let deviceSettingsRenameValue = "";
 
 function iconSvg(icon) {
   const common = 'fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"';
@@ -2296,6 +2682,7 @@ function renderDevices(payload) {
   const devices = payload.devices || [];
   if (!devices.length) {
     devicesEl.innerHTML = '<div class="empty">No devices added yet.</div>';
+    renderDeviceSettingsModal();
     return;
   }
   devicesEl.innerHTML = devices.map((device) => {
@@ -2309,10 +2696,14 @@ function renderDevices(payload) {
           <div class="meta">${escapeHtml(device.host)} · ${version}${configured}/4 channels configured</div>
           <div class="status"><span class="dot ${status.cls}"></span>${escapeHtml(status.text)}</div>
         </div>
-        <button class="danger" data-remove="${escapeHtml(device.device_id)}">Remove</button>
+        <div class="item-actions">
+          <button class="secondary" data-device-settings="${escapeHtml(device.device_id)}">Settings</button>
+          <button class="danger" data-remove="${escapeHtml(device.device_id)}">Remove</button>
+        </div>
       </div>
     `;
   }).join("");
+  renderDeviceSettingsModal();
 }
 
 async function refreshDevices() {
@@ -2330,7 +2721,305 @@ async function addDevice(host, name) {
 async function removeDevice(deviceId) {
   const params = new URLSearchParams({device_id: deviceId});
   await fetchJson("devices/remove?" + params.toString());
+  if (deviceSettingsId === deviceId) closeDeviceSettings();
   await refreshDashboard(true);
+}
+
+function findDevice(deviceId) {
+  return (dashboardPayload.devices || []).find((device) => device.device_id === deviceId);
+}
+
+function openDeviceSettings(deviceId) {
+  deviceSettingsId = deviceId;
+  deviceSettingsBusy = "checking";
+  deviceSettingsMessage = "Checking firmware version...";
+  deviceSettingsTone = "";
+  deviceSettingsUpdateAvailable = false;
+  deviceSettingsLatestVersion = "";
+  deviceSettingsConfirm = "";
+  deviceSettingsUpdateAcknowledged = false;
+  deviceSettingsRenameValue = "";
+  renderDeviceSettingsModal();
+  checkFirmware(deviceId);
+}
+
+function closeDeviceSettings() {
+  deviceSettingsId = "";
+  deviceSettingsBusy = "";
+  deviceSettingsMessage = "";
+  deviceSettingsTone = "";
+  deviceSettingsUpdateAvailable = false;
+  deviceSettingsLatestVersion = "";
+  deviceSettingsConfirm = "";
+  deviceSettingsUpdateAcknowledged = false;
+  deviceSettingsRenameValue = "";
+  renderDeviceSettingsModal();
+}
+
+function setDeviceSettingsStatus(message, tone = "", busy = "") {
+  deviceSettingsMessage = message;
+  deviceSettingsTone = tone;
+  deviceSettingsBusy = busy;
+  renderDeviceSettingsModal();
+}
+
+function renderDeviceSettingsModal() {
+  const modal = document.getElementById("deviceSettingsModal");
+  const device = findDevice(deviceSettingsId);
+  if (!device) {
+    modal.classList.add("hidden");
+    modal.innerHTML = "";
+    return;
+  }
+  const status = deviceStatus(device);
+  const updateStatus = device.firmware_update_status || "idle";
+  const updateError = device.firmware_update_error || "";
+  const busy = Boolean(deviceSettingsBusy) || updateStatus === "updating";
+  const message = deviceSettingsMessage || (updateError ? updateError : "");
+  const messageClass = deviceSettingsTone === "error" || updateError ? "error" : "meta";
+  const updateAvailable = deviceSettingsUpdateAvailable && deviceSettingsLatestVersion;
+  const confirmingUpdate = deviceSettingsConfirm === "update_firmware";
+  const confirmingReset = deviceSettingsConfirm === "reset_network";
+  const renamingDevice = deviceSettingsConfirm === "rename_device";
+  modal.classList.remove("hidden");
+  if (renamingDevice) {
+    modal.innerHTML = `
+      <div class="modal" role="dialog" aria-modal="true" aria-label="Rename GrowCube">
+        <div class="modal-header">
+          <div>
+            <h2>Rename GrowCube</h2>
+            <div class="meta">${escapeHtml(device.host)}</div>
+          </div>
+          <button class="icon-control" type="button" data-close-device-settings aria-label="Close">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"></path></svg>
+          </button>
+        </div>
+        <div class="modal-body">
+          <label class="settings-stat">
+            <div class="label">Name</div>
+            <input id="deviceRenameInput" value="${escapeHtml(deviceSettingsRenameValue)}" maxlength="64">
+          </label>
+          <div class="modal-actions">
+            <button class="secondary" data-cancel-device-confirm>Cancel</button>
+            <button data-confirm-rename-device="${escapeHtml(device.device_id)}">Save</button>
+          </div>
+          <div class="modal-status">
+            ${busy ? '<span class="spinner"></span>' : ""}
+            <span class="${messageClass}">${escapeHtml(message)}</span>
+          </div>
+        </div>
+      </div>
+    `;
+    setTimeout(() => {
+      const input = document.getElementById("deviceRenameInput");
+      input?.focus();
+      input?.select();
+    }, 0);
+    return;
+  }
+  if (confirmingReset) {
+    modal.innerHTML = `
+      <div class="modal" role="dialog" aria-modal="true" aria-label="Reset network">
+        <div class="modal-header">
+          <div>
+            <h2>Reset network</h2>
+            <div class="meta">${escapeHtml(device.name || "GrowCube")} · ${escapeHtml(device.host)}</div>
+          </div>
+          <button class="icon-control" type="button" data-close-device-settings aria-label="Close">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"></path></svg>
+          </button>
+        </div>
+        <div class="modal-body">
+          <div class="warning-box">
+            Reset Wi-Fi settings? GrowCube will restart, leave this network, and must be configured again.
+          </div>
+          <div class="modal-actions">
+            <button class="secondary" data-cancel-device-confirm>Cancel</button>
+            <button class="danger" data-confirm-reset-network="${escapeHtml(device.device_id)}">Reset network</button>
+          </div>
+          <div class="modal-status">
+            ${busy ? '<span class="spinner"></span>' : ""}
+            <span class="${messageClass}">${escapeHtml(message)}</span>
+          </div>
+        </div>
+      </div>
+    `;
+    return;
+  }
+  modal.innerHTML = `
+    <div class="modal" role="dialog" aria-modal="true" aria-label="Device settings">
+      <div class="modal-header">
+        <div>
+          <div class="modal-title-row">
+            <h2>${escapeHtml(device.name || "GrowCube")}</h2>
+            <button class="round-edit" type="button" data-rename-device="${escapeHtml(device.device_id)}" aria-label="Rename GrowCube" title="Rename GrowCube" ${busy ? "disabled" : ""}>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4.2L18.7 9.5a2.1 2.1 0 0 0 0-3L17.5 5.3a2.1 2.1 0 0 0-3 0L4 15.8V20Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"></path><path d="m13.6 6.2 4.2 4.2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path></svg>
+            </button>
+          </div>
+          <div class="meta">${escapeHtml(device.host)}</div>
+        </div>
+        <button class="icon-control" type="button" data-close-device-settings aria-label="Close">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"></path></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        ${confirmingUpdate ? `
+          <div class="warning-box">
+            <div class="title">Update firmware</div>
+            <p>Do not power off GrowCube during the update process. Interrupting the update may make the device unavailable.</p>
+            <label class="row" style="margin-top:12px">
+              <input type="checkbox" data-update-ack ${deviceSettingsUpdateAcknowledged ? "checked" : ""} style="min-width:auto; flex:0 0 auto">
+              <span>I understand that GrowCube must stay powered on during the update.</span>
+            </label>
+            <div class="modal-actions" style="margin-top:14px">
+              <button class="secondary" data-cancel-device-confirm>Cancel</button>
+              <button class="danger" data-confirm-update-firmware="${escapeHtml(device.device_id)}" ${deviceSettingsUpdateAcknowledged ? "" : "disabled"}>Update firmware</button>
+            </div>
+          </div>
+        ` : `
+        <div class="settings-grid">
+          <div class="settings-stat">
+            <div class="label">Current firmware version</div>
+            <div class="value">${escapeHtml(device.version || "Unknown")}</div>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="secondary" data-check-firmware="${escapeHtml(device.device_id)}" ${busy ? "disabled" : ""}>Check for updates</button>
+          ${updateAvailable ? `<button data-update-firmware="${escapeHtml(device.device_id)}" ${busy || !device.connected || confirmingUpdate ? "disabled" : ""}>Update firmware</button>` : ""}
+          <button class="danger" data-reset-network="${escapeHtml(device.device_id)}" ${busy || !device.connected || confirmingReset ? "disabled" : ""}>Reset network</button>
+        </div>
+        <div class="modal-status">
+          ${busy ? '<span class="spinner"></span>' : ""}
+          <span class="${messageClass}">${escapeHtml(message || (busy ? "Working..." : "Your GrowCube is up to date."))}</span>
+        </div>
+        `}
+      </div>
+    </div>
+  `;
+}
+
+async function checkFirmware(deviceId) {
+  if (!findDevice(deviceId)) return;
+  deviceSettingsUpdateAvailable = false;
+  deviceSettingsLatestVersion = "";
+  setDeviceSettingsStatus("Checking GrowCube firmware server...", "", "checking");
+  try {
+    const params = new URLSearchParams({device_id: deviceId});
+    const payload = await fetchJson("devices/firmware/check?" + params.toString());
+    if (deviceSettingsId !== deviceId) return;
+    deviceSettingsUpdateAvailable = Boolean(payload.update_available);
+    deviceSettingsLatestVersion = payload.latest_version || "";
+    if (deviceSettingsUpdateAvailable) {
+      const suffix = deviceSettingsLatestVersion ? ` Version ${deviceSettingsLatestVersion} is available.` : " A firmware update is available.";
+      setDeviceSettingsStatus(suffix.trim(), "ok", "");
+    } else {
+      setDeviceSettingsStatus("Your GrowCube is up to date.", "ok", "");
+    }
+  } catch (err) {
+    if (deviceSettingsId !== deviceId) return;
+    setDeviceSettingsStatus(err.message || "Could not check firmware updates", "error", "");
+  }
+}
+
+async function updateFirmware(deviceId) {
+  const device = findDevice(deviceId);
+  if (!device) return;
+  if (!deviceSettingsUpdateAcknowledged) {
+    setDeviceSettingsStatus("Please confirm that you have read the warning.", "error", "");
+    deviceSettingsConfirm = "update_firmware";
+    return;
+  }
+  deviceSettingsConfirm = "";
+  deviceSettingsUpdateAcknowledged = false;
+  setDeviceSettingsStatus("Downloading firmware from GrowCube server...", "", "downloading");
+  try {
+    const params = new URLSearchParams({device_id: deviceId});
+    await fetchJson("devices/firmware/update?" + params.toString());
+    setDeviceSettingsStatus("Firmware uploaded. GrowCube is restarting; waiting for reconnect.", "ok", "");
+    await refreshDashboard(true);
+  } catch (err) {
+    setDeviceSettingsStatus(err.message || "Firmware update failed", "error", "");
+  }
+}
+
+function askUpdateFirmware(deviceId) {
+  if (!findDevice(deviceId)) return;
+  deviceSettingsConfirm = "update_firmware";
+  deviceSettingsUpdateAcknowledged = false;
+  deviceSettingsRenameValue = "";
+  deviceSettingsMessage = "";
+  deviceSettingsTone = "";
+  renderDeviceSettingsModal();
+}
+
+function askRenameDevice(deviceId) {
+  const device = findDevice(deviceId);
+  if (!device) return;
+  deviceSettingsConfirm = "rename_device";
+  deviceSettingsRenameValue = device.name || "GrowCube";
+  deviceSettingsMessage = "";
+  deviceSettingsTone = "";
+  renderDeviceSettingsModal();
+}
+
+async function renameDevice(deviceId) {
+  const device = findDevice(deviceId);
+  if (!device) return;
+  const input = document.getElementById("deviceRenameInput");
+  const name = String(input?.value || "").trim();
+  deviceSettingsRenameValue = name;
+  if (!name) {
+    setDeviceSettingsStatus("Name is required.", "error", "");
+    return;
+  }
+  if (name === (device.name || "GrowCube")) {
+    deviceSettingsConfirm = "";
+    deviceSettingsRenameValue = "";
+    renderDeviceSettingsModal();
+    return;
+  }
+  setDeviceSettingsStatus("Saving device name...", "", "saving");
+  try {
+    const params = new URLSearchParams({device_id: deviceId, name});
+    await fetchJson("devices/rename?" + params.toString());
+    deviceSettingsConfirm = "";
+    deviceSettingsRenameValue = "";
+    await refreshDashboard(true);
+    setDeviceSettingsStatus("Device name saved.", "ok", "");
+  } catch (err) {
+    setDeviceSettingsStatus(err.message || "Could not save device name", "error", "");
+  }
+}
+
+function askResetNetwork(deviceId) {
+  if (!findDevice(deviceId)) return;
+  deviceSettingsConfirm = "reset_network";
+  deviceSettingsRenameValue = "";
+  deviceSettingsMessage = "";
+  deviceSettingsTone = "";
+  renderDeviceSettingsModal();
+}
+
+function cancelDeviceConfirm() {
+  deviceSettingsConfirm = "";
+  deviceSettingsUpdateAcknowledged = false;
+  deviceSettingsRenameValue = "";
+  renderDeviceSettingsModal();
+}
+
+async function resetNetwork(deviceId) {
+  const device = findDevice(deviceId);
+  if (!device) return;
+  deviceSettingsConfirm = "";
+  setDeviceSettingsStatus("Resetting network settings...", "", "resetting");
+  try {
+    const params = new URLSearchParams({device_id: deviceId});
+    await fetchJson("devices/reset_network?" + params.toString());
+    setDeviceSettingsStatus("Network reset requested. GrowCube will restart and leave this network.", "ok", "");
+    await refreshDashboard(true);
+  } catch (err) {
+    setDeviceSettingsStatus(err.message || "Network reset failed", "error", "");
+  }
 }
 
 async function discoverDevices() {
@@ -2352,7 +3041,7 @@ async function discoverDevices() {
         </div>
         <button data-add="${escapeHtml(device.host)}" data-name="${escapeHtml(device.name || "GrowCube")}">Add</button>
       </div>
-    `).join("") || '<div class="empty">Try entering the network manually, for example 192.168.1.0/24.</div>';
+    `).join("") || '<div class="empty">If the cube is open in the GrowCube mobile app or another controller, close that app first so it releases the TCP connection, then run automatic search again. You can also enter the network manually, for example 192.168.1.0/24.</div>';
   } catch (err) {
     statusEl.innerHTML = '<span class="error">' + escapeHtml(err.message) + '</span>';
   } finally {
@@ -2401,10 +3090,59 @@ window.addEventListener("popstate", () => {
   updateDashboardCard();
 });
 document.addEventListener("click", async (event) => {
-  const addHost = event.target?.dataset?.add;
-  const removeId = event.target?.dataset?.remove;
-  if (addHost) await addDevice(addHost, event.target.dataset.name || addHost);
+  const actionTarget = event.target?.closest?.("[data-add],[data-remove],[data-device-settings],[data-rename-device],[data-confirm-rename-device],[data-check-firmware],[data-update-firmware],[data-confirm-update-firmware],[data-reset-network],[data-confirm-reset-network],[data-cancel-device-confirm],[data-close-device-settings]");
+  const addHost = actionTarget?.dataset?.add;
+  const removeId = actionTarget?.dataset?.remove;
+  const settingsId = actionTarget?.dataset?.deviceSettings;
+  const renameId = actionTarget?.dataset?.renameDevice;
+  const confirmRenameId = actionTarget?.dataset?.confirmRenameDevice;
+  const checkId = actionTarget?.dataset?.checkFirmware;
+  const updateId = actionTarget?.dataset?.updateFirmware;
+  const confirmUpdateId = actionTarget?.dataset?.confirmUpdateFirmware;
+  const resetId = actionTarget?.dataset?.resetNetwork;
+  const confirmResetId = actionTarget?.dataset?.confirmResetNetwork;
+  if (actionTarget?.dataset?.closeDeviceSettings !== undefined || event.target?.id === "deviceSettingsModal") {
+    closeDeviceSettings();
+    return;
+  }
+  if (actionTarget?.dataset?.cancelDeviceConfirm !== undefined) {
+    cancelDeviceConfirm();
+    return;
+  }
+  if (addHost) await addDevice(addHost, actionTarget.dataset.name || addHost);
+  if (settingsId) openDeviceSettings(settingsId);
+  if (renameId) askRenameDevice(renameId);
+  if (confirmRenameId) await renameDevice(confirmRenameId);
+  if (checkId) await checkFirmware(checkId);
+  if (updateId) askUpdateFirmware(updateId);
+  if (confirmUpdateId) await updateFirmware(confirmUpdateId);
+  if (resetId) askResetNetwork(resetId);
+  if (confirmResetId) await resetNetwork(confirmResetId);
   if (removeId) await removeDevice(removeId);
+});
+
+document.addEventListener("input", (event) => {
+  if (event.target?.id === "deviceRenameInput") {
+    deviceSettingsRenameValue = event.target.value;
+  }
+});
+
+document.addEventListener("change", (event) => {
+  if (event.target?.id === "deviceRenameInput") {
+    return;
+  }
+  if (event.target?.dataset?.updateAck !== undefined) {
+    deviceSettingsUpdateAcknowledged = Boolean(event.target.checked);
+    renderDeviceSettingsModal();
+  }
+});
+
+document.addEventListener("keydown", async (event) => {
+  if (event.key !== "Enter" || event.target?.id !== "deviceRenameInput" || !deviceSettingsId) {
+    return;
+  }
+  event.preventDefault();
+  await renameDevice(deviceSettingsId);
 });
 
 refreshDashboard(true).catch((err) => {
@@ -2489,6 +3227,14 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
                 self._write_json(manager.add_device_payload(params))
             elif parsed.path == "/devices/remove":
                 self._write_json(manager.remove_device_payload(params))
+            elif parsed.path == "/devices/rename":
+                self._write_json(manager.rename_device_payload(params))
+            elif parsed.path == "/devices/reset_network":
+                self._write_json(manager.reset_network_payload(first_query_value(params, "device_id")))
+            elif parsed.path == "/devices/firmware/check":
+                self._write_json(manager.firmware_check_payload(first_query_value(params, "device_id")))
+            elif parsed.path == "/devices/firmware/update":
+                self._write_json(manager.firmware_update_payload(first_query_value(params, "device_id")))
             elif parsed.path == "/entity/command":
                 self._write_json(manager.entity_command_payload(params))
             elif parsed.path == "/history":
@@ -2519,6 +3265,8 @@ class GrowCubeApiHandler(BaseHTTPRequestHandler):
         except KeyError as err:
             self._write_json({"error": str(err)}, HTTPStatus.NOT_FOUND)
         except ValueError as err:
+            self._write_json({"error": str(err)}, HTTPStatus.BAD_REQUEST)
+        except RuntimeError as err:
             self._write_json({"error": str(err)}, HTTPStatus.BAD_REQUEST)
         except Exception as err:
             LOGGER.exception("GrowCube ingress API request failed: %s", self.path)
@@ -2808,7 +3556,7 @@ async def tcp_port_open(host: str, port: int, timeout_seconds: float) -> bool:
     return True
 
 
-async def probe_growcube_device(host: str) -> dict[str, Any] | None:
+async def probe_growcube_device(host: str, time_provider: Callable[[], Any]) -> dict[str, Any] | None:
     loop = asyncio.get_running_loop()
     device_future: asyncio.Future[DeviceVersionReport] = loop.create_future()
 
@@ -2816,7 +3564,7 @@ async def probe_growcube_device(host: str) -> dict[str, Any] | None:
         if isinstance(report, DeviceVersionReport) and not device_future.done():
             device_future.set_result(report)
 
-    client = GrowCubeClient(host, 8800, on_report=on_report)
+    client = GrowCubeClient(host, 8800, on_report=on_report, time_provider=time_provider)
     ok, error = await client.connect()
     if not ok:
         LOGGER.debug("GrowCube discovery probe failed host=%s error=%s", host, error)
@@ -2919,8 +3667,11 @@ def dashboard_device_entities(device_id: str) -> dict[str, str]:
         "tank_remaining": entity_id("sensor", device_id, "tank_remaining"),
         "tank_level": entity_id("sensor", device_id, "tank_level"),
         "tank_days_left": entity_id("sensor", device_id, "tank_days_left"),
+        "firmware_update_status": entity_id("sensor", device_id, "firmware_update_status"),
         "tank_capacity": entity_id("number", device_id, "tank_capacity"),
         "mark_tank_full": entity_id("button", device_id, "mark_tank_full"),
+        "reset_network": entity_id("button", device_id, "reset_network"),
+        "update_firmware": entity_id("button", device_id, "update_firmware"),
     }
 
 
@@ -3002,7 +3753,16 @@ def dashboard_entity_states(
         forecast=device.get("tank_forecast") or {},
     )
     add(entities["tank_capacity"], device.get("tank_capacity_ml"), unit_of_measurement="mL")
+    add(
+        entities["firmware_update_status"],
+        device.get("firmware_update_status") or "idle",
+        installed_version=device.get("version"),
+        firmware_update_error=device.get("firmware_update_error") or "",
+        firmware_update_started_at=device.get("firmware_update_started_at"),
+    )
     add(entities["mark_tank_full"], "unknown")
+    add(entities["reset_network"], "unknown")
+    add(entities["update_firmware"], "unknown")
 
     device_channels = device.get("channels") or []
     for index, channel_key in enumerate("abcd"):
@@ -3135,6 +3895,152 @@ def fetch_remote_image(url_value: str) -> tuple[bytes, str]:
         return response.read(), content_type
 
 
+def check_growcube_firmware_update(current_version: str | None) -> dict[str, Any]:
+    version = normalize_firmware_version(current_version)
+    query_url = f"{FIRMWARE_UPDATE_CHECK_URL}?v={quote(version)}"
+    request = Request(query_url, headers={"User-Agent": "GrowCubeAddon/0.2"}, method="GET")
+    LOGGER.info("Checking GrowCube firmware update url=%s current=%s", query_url, version)
+    try:
+        with urlopen(request, timeout=FIRMWARE_DOWNLOAD_TIMEOUT_SECONDS) as response:
+            line = response.readline(2048).decode("utf-8", errors="replace").strip()
+    except HTTPError as err:
+        body_text = err.read(2048).decode("utf-8", errors="replace")
+        raise RuntimeError(f"firmware check failed: HTTP {err.code}: {body_text[:160]}") from err
+    except URLError as err:
+        raise RuntimeError(f"firmware check failed: {err.reason}") from err
+    if not line:
+        raise RuntimeError("firmware check failed: empty server response")
+    if line == FIRMWARE_LATEST_MESSAGE:
+        return {
+            "update_available": False,
+            "current_version": current_version or "",
+            "latest_version": current_version or "",
+            "download_url": "",
+            "message": "latest installed",
+        }
+    download_url = urljoin(FIRMWARE_UPDATE_CHECK_URL, line)
+    parsed = urlparse(download_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not parsed.path.lower().endswith(".bin"):
+        raise RuntimeError(f"firmware check failed: unexpected server response: {line[:160]}")
+    latest_version = firmware_version_from_url(download_url) or ""
+    return {
+        "update_available": True,
+        "current_version": current_version or "",
+        "latest_version": latest_version,
+        "download_url": download_url,
+        "message": "update available",
+    }
+
+
+def normalize_firmware_version(version: str | None) -> str:
+    text = str(version or "").strip()
+    return text if text else "0"
+
+
+def firmware_version_from_url(url: str) -> str | None:
+    filename = Path(urlparse(url).path).name
+    match = re.search(r"(?:^|_)V(\d+(?:\.\d+)*)(?:_|\.bin$)", filename, flags=re.IGNORECASE)
+    return match.group(1) if match else None
+
+
+def download_growcube_firmware_update(current_version: str | None) -> Path:
+    info = check_growcube_firmware_update(current_version)
+    if not info.get("update_available"):
+        raise RuntimeError("device firmware is already up to date")
+    download_url = str(info.get("download_url") or "")
+    FIRMWARE_DOWNLOAD_PATH.parent.mkdir(parents=True, exist_ok=True)
+    request = Request(download_url, headers={"User-Agent": "GrowCubeAddon/0.2"}, method="GET")
+    LOGGER.info(
+        "Downloading GrowCube firmware url=%s latest=%s",
+        download_url,
+        info.get("latest_version") or "unknown",
+    )
+    try:
+        with urlopen(request, timeout=FIRMWARE_DOWNLOAD_TIMEOUT_SECONDS) as response:
+            body = response.read(FIRMWARE_MAX_BYTES + 1)
+    except HTTPError as err:
+        body_text = err.read(2048).decode("utf-8", errors="replace")
+        raise RuntimeError(f"firmware download failed: HTTP {err.code}: {body_text[:160]}") from err
+    except URLError as err:
+        raise RuntimeError(f"firmware download failed: {err.reason}") from err
+    if len(body) > FIRMWARE_MAX_BYTES:
+        raise RuntimeError(f"firmware image is too large: {len(body)} bytes")
+    if not body:
+        raise RuntimeError("firmware download failed: empty file")
+    FIRMWARE_DOWNLOAD_PATH.write_bytes(body)
+    return validate_firmware_image(FIRMWARE_DOWNLOAD_PATH)
+
+
+def validate_firmware_image(path: Path) -> Path:
+    if not path.is_file():
+        raise RuntimeError(f"firmware image not found: {path}")
+    if path.suffix.lower() != ".bin":
+        raise RuntimeError(f"firmware image must be a .bin file: {path.name}")
+    size = path.stat().st_size
+    if size <= 0:
+        raise RuntimeError(f"firmware image is empty: {path.name}")
+    if size > FIRMWARE_MAX_BYTES:
+        raise RuntimeError(f"firmware image is too large: {size} bytes")
+    return path
+
+
+def firmware_image_path() -> Path:
+    if FIRMWARE_DATA_IMAGE_PATH.is_file():
+        return validate_firmware_image(FIRMWARE_DATA_IMAGE_PATH)
+    if FIRMWARE_BUNDLED_IMAGE_PATH.is_file():
+        return validate_firmware_image(FIRMWARE_BUNDLED_IMAGE_PATH)
+    raise RuntimeError(
+        "firmware image not found. Put growcube-local.bin into /data/firmware/growcube-local.bin"
+    )
+
+
+def upload_firmware_image(host: str, path: Path) -> dict[str, Any]:
+    firmware = validate_firmware_image(path)
+    boundary = f"----GrowCubeFirmware{uuid.uuid4().hex}"
+    filename = "GrowCube-Software.bin"
+    header = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+        "Content-Type: application/octet-stream\r\n"
+        "\r\n"
+    ).encode("ascii")
+    footer = f"\r\n--{boundary}--\r\n".encode("ascii")
+    body = header + firmware.read_bytes() + footer
+    url = f"http://{http_host(host)}/update"
+    request = Request(
+        url,
+        data=body,
+        headers={
+            "Content-Type": f"multipart/form-data;boundary={boundary}",
+            "Content-Length": str(len(body)),
+            "Connection": "close",
+        },
+        method="POST",
+    )
+    LOGGER.info("Uploading firmware to %s bytes=%s image=%s", url, firmware.stat().st_size, firmware.name)
+    try:
+        with urlopen(request, timeout=FIRMWARE_UPLOAD_TIMEOUT_SECONDS) as response:
+            response_body = response.read(4096).decode("utf-8", errors="replace")
+            return {
+                "status": int(response.status),
+                "firmware": firmware.name,
+                "bytes": firmware.stat().st_size,
+                "response": response_body[:240],
+            }
+    except HTTPError as err:
+        body_text = err.read(4096).decode("utf-8", errors="replace")
+        raise RuntimeError(f"firmware upload failed: HTTP {err.code}: {body_text[:240]}") from err
+    except URLError as err:
+        raise RuntimeError(f"firmware upload failed: {err.reason}") from err
+
+
+def http_host(host: str) -> str:
+    text = str(host or "").strip()
+    if ":" in text and not text.startswith("["):
+        return f"[{text}]"
+    return text
+
+
 def save_uploaded_plant_photo(payload: dict[str, Any]) -> dict[str, Any]:
     content_type = str(payload.get("content_type") or "").split(";", 1)[0].strip().lower()
     extension_by_type = {
@@ -3207,6 +4113,66 @@ def supervisor_ingress_url() -> str:
         or data.get("ingress_path")
         or ""
     )
+
+
+def homeassistant_time_zone() -> str:
+    token = os.environ.get("SUPERVISOR_TOKEN", "")
+    if not token:
+        return ""
+    request = Request(
+        "http://supervisor/core/api/config",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, OSError) as err:
+        LOGGER.warning("Could not query Home Assistant config for time zone: %s", err)
+        return ""
+
+    time_zone = str(payload.get("time_zone") or "").strip() if isinstance(payload, dict) else ""
+    if not time_zone:
+        return ""
+    try:
+        ZoneInfo(time_zone)
+    except ZoneInfoNotFoundError:
+        LOGGER.warning("Home Assistant returned unknown time zone: %s", time_zone)
+        return ""
+    return time_zone
+
+
+def fetch_network_utc_time() -> datetime | None:
+    headers = {
+        "User-Agent": "GrowCubeAddon/0.2",
+        "Accept": "*/*",
+    }
+    for url in NETWORK_TIME_URLS:
+        for method in ("HEAD", "GET"):
+            request = Request(url, headers=headers, method=method)
+            try:
+                with urlopen(request, timeout=NETWORK_TIME_TIMEOUT_SECONDS) as response:
+                    date_header = response.headers.get("Date", "")
+                    if method == "GET":
+                        response.read(1)
+            except HTTPError as err:
+                date_header = err.headers.get("Date", "") if err.headers is not None else ""
+            except (URLError, TimeoutError, OSError) as err:
+                LOGGER.warning("Could not fetch network time from %s with %s: %s", url, method, err)
+                continue
+            try:
+                parsed = parsedate_to_datetime(date_header)
+            except (TypeError, ValueError) as err:
+                LOGGER.warning("Network time response from %s with %s had invalid Date header %r: %s", url, method, date_header, err)
+                continue
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            value = parsed.astimezone(timezone.utc)
+            LOGGER.info("Fetched network time from %s with %s: %s", url, method, value.isoformat(timespec="seconds"))
+            return value
+    return None
 
 
 def normalize_ingress_url(value: Any) -> str:

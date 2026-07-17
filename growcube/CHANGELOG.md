@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.2.98
+
+- Stop sending `elea57` timezone configuration; synchronize GrowCube RTC from Home Assistant with `elea44` only.
+- Prefer GrowCube and China-friendly HTTP Date sources before global fallbacks when syncing device RTC.
+- Refresh channel history shortly after pump activity so Recent activity updates automatically for device-recorded watering events.
+- Restore the Manual watering dialog flow so the Water button sends the selected amount again.
+
+## 0.2.97
+
+- Fall back to the time-sync datetime offset when the explicit `elea57` timezone provider returns `0` inside Home Assistant.
+
+## 0.2.96
+
+- Calculate the `elea57` timezone offset directly from the Home Assistant time zone instead of deriving it from the legacy time-sync datetime.
+
+## 0.2.95
+
+- Send only the GrowCube timezone offset with `elea57`; firmware now keeps default NTP servers locally.
+
+## 0.2.94
+
+- Send GrowCube timezone offset and China-friendly NTP servers with the new `elea57` time config command before the legacy RTC sync.
+
+## 0.2.93
+
+- Sync GrowCube RTC from external network time on TCP connect so HAOS/VM sleep clock drift does not send stale time to the device.
+
+## 0.2.85
+
+- Look for the local firmware image in persistent add-on data at `/data/firmware/growcube-local.bin` before falling back to a bundled image.
+
+## 0.2.84
+
+- Add local firmware OTA upload for GrowCube devices using the bundled firmware image.
+- Add Home Assistant and Web UI controls for firmware update status and update start.
+- Add device reset network controls and firmware version display.
+- Highlight moisture and humidity values that are outside the configured plant range.
+
 ## 0.2.82
 
 - Clear the HA channel plant profile and cached plant history when GrowCube reports `plant_id=0` after deletion from Android.
